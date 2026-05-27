@@ -12,6 +12,10 @@ function jsonResponse(body, status = 200) {
   });
 }
 
+function methodNotAllowed() {
+  return jsonResponse({ success: false, message: "只支持 POST 请求。" }, 405);
+}
+
 function normalizeLink(link) {
   return String(link || "").trim();
 }
@@ -44,6 +48,21 @@ function githubHeaders(token) {
     "X-GitHub-Api-Version": "2022-11-28",
     "User-Agent": "wechat-archive-submit-function",
   };
+}
+
+async function githubErrorMessage(response, fallback) {
+  let message = fallback;
+  try {
+    const data = await response.json();
+    if (data && data.message) {
+      message = `${fallback}（GitHub ${response.status}: ${data.message}）`;
+    } else {
+      message = `${fallback}（GitHub ${response.status}）`;
+    }
+  } catch {
+    message = `${fallback}（GitHub ${response.status}）`;
+  }
+  return message;
 }
 
 function decodeBase64Utf8(content) {
@@ -80,7 +99,7 @@ async function readGithubFile(env) {
   }
 
   if (!response.ok) {
-    throw new Error("读取链接库失败");
+    throw new Error(await githubErrorMessage(response, "读取链接库失败"));
   }
 
   const file = await response.json();
@@ -122,22 +141,36 @@ async function writeGithubFile(env, sha, data) {
   });
 
   if (!response.ok) {
-    throw new Error("更新链接库失败");
+    throw new Error(await githubErrorMessage(response, "更新链接库失败"));
   }
 }
 
-function validateEnv(env) {
+function missingEnvKeys(env) {
   const required = ["GITHUB_TOKEN", "GITHUB_OWNER", "GITHUB_REPO", "SUBMIT_PASSWORD"];
-  return required.every((key) => Boolean(env[key]));
+  return required.filter((key) => !env[key]);
 }
 
 export async function onRequest({ request, env }) {
-  if (request.method !== "POST") {
-    return jsonResponse({ success: false, message: "只支持 POST 请求。" }, 405);
+  if (request.method === "OPTIONS") {
+    return jsonResponse({ success: true, message: "ok" });
   }
 
-  if (!validateEnv(env)) {
-    return jsonResponse({ success: false, message: "服务端配置不完整。" }, 500);
+  if (request.method === "GET") {
+    const missing = missingEnvKeys(env);
+    return jsonResponse({
+      success: missing.length === 0,
+      message: missing.length === 0 ? "Submit API 已部署，环境变量已配置。" : `Submit API 已部署，但缺少环境变量：${missing.join(", ")}`,
+      branch: env.GITHUB_BRANCH || "main",
+    }, missing.length === 0 ? 200 : 500);
+  }
+
+  if (request.method !== "POST") {
+    return methodNotAllowed();
+  }
+
+  const missing = missingEnvKeys(env);
+  if (missing.length > 0) {
+    return jsonResponse({ success: false, message: `服务端配置不完整，缺少：${missing.join(", ")}` }, 500);
   }
 
   let payload;
@@ -201,7 +234,7 @@ export async function onRequest({ request, env }) {
       total: data.links.length,
       message: "提交成功，稍后网站会自动更新。",
     });
-  } catch {
-    return jsonResponse({ success: false, message: "服务端更新失败，请稍后重试。" }, 500);
+  } catch (error) {
+    return jsonResponse({ success: false, message: error.message || "服务端更新失败，请稍后重试。" }, 500);
   }
 }

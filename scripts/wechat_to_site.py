@@ -593,9 +593,15 @@ def write_submit_page() -> None:
           headers: {"Content-Type": "application/json"},
           body: JSON.stringify({password, links})
         });
-        const data = await response.json().catch(() => ({}));
+        const text = await response.text();
+        let data = {};
+        try {
+          data = text ? JSON.parse(text) : {};
+        } catch {
+          throw new Error(`提交接口没有返回 JSON，HTTP ${response.status}。请检查 Cloudflare Pages Functions 是否已部署。`);
+        }
         if (!response.ok || !data.success) {
-          throw new Error(data.message || "提交失败，请稍后重试。");
+          throw new Error(data.message || `提交失败，HTTP ${response.status}。`);
         }
         setResult(`${data.message} 新增 ${data.added} 条，当前共 ${data.total} 条。`, true);
         document.querySelector("#links").value = "";
