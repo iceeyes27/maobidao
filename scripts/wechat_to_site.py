@@ -11,6 +11,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs, urlparse
 
 import requests
 from bs4 import BeautifulSoup
@@ -22,6 +23,7 @@ URLS_TXT = ROOT / "urls.txt"
 PUBLIC = ROOT / "public"
 ARTICLES_DIR = PUBLIC / "articles"
 ASSETS_DIR = PUBLIC / "assets"
+IMAGES_DIR = ASSETS_DIR / "images"
 PUBLIC_DATA_DIR = PUBLIC / "data"
 ARTICLES_JSON = PUBLIC_DATA_DIR / "articles.json"
 
@@ -148,6 +150,95 @@ def meta_content(soup: BeautifulSoup, selector: str) -> str:
     return clean_text(element.get("content", ""))
 
 
+def image_extension_from_url(url: str) -> str:
+    parsed = urlparse(url)
+    query = parse_qs(parsed.query)
+    wx_fmt = query.get("wx_fmt", [""])[0].lower()
+    if wx_fmt in {"jpeg", "jpg", "png", "gif", "webp"}:
+        return "jpg" if wx_fmt == "jpeg" else wx_fmt
+
+    suffix = Path(parsed.path).suffix.lower().lstrip(".")
+    if suffix in {"jpeg", "jpg", "png", "gif", "webp"}:
+        return "jpg" if suffix == "jpeg" else suffix
+
+    return ""
+
+
+def image_extension_from_type(content_type: str) -> str:
+    content_type = content_type.split(";", 1)[0].strip().lower()
+    return {
+        "image/jpeg": "jpg",
+        "image/jpg": "jpg",
+        "image/png": "png",
+        "image/gif": "gif",
+        "image/webp": "webp",
+    }.get(content_type, "jpg")
+
+
+def download_image(source_url: str, article_url: str, image_dir: Path) -> str:
+    digest = hashlib.md5(source_url.encode("utf-8")).hexdigest()
+    existing = next(image_dir.glob(f"{digest}.*"), None)
+    if existing:
+        return f"/assets/images/{image_dir.name}/{existing.name}"
+
+    try:
+        response = requests.get(
+            source_url,
+            headers={
+                "User-Agent": USER_AGENT,
+                "Referer": article_url,
+                "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+            },
+            timeout=20,
+        )
+        response.raise_for_status()
+    except requests.RequestException:
+        return source_url
+
+    content_type = response.headers.get("content-type", "")
+    if content_type and not content_type.lower().startswith("image/"):
+        return source_url
+
+    extension = image_extension_from_url(source_url) or image_extension_from_type(content_type)
+    filename = f"{digest}.{extension}"
+    target = image_dir / filename
+    target.write_bytes(response.content)
+    return f"/assets/images/{image_dir.name}/{filename}"
+
+
+def localize_article_images(article: dict[str, Any]) -> dict[str, Any]:
+    if not article.get("success") or not article.get("content_html"):
+        return article
+
+    soup = BeautifulSoup(article["content_html"], "lxml")
+    root = soup.select_one("#js_content") or soup.find("div")
+    if not root:
+        return article
+
+    image_dir = IMAGES_DIR / article["id"]
+    image_dir.mkdir(parents=True, exist_ok=True)
+
+    changed = False
+    for image in root.select("img"):
+        source = image.get("src") or image.get("data-src") or image.get("data-original")
+        if not source or source.startswith("/assets/images/"):
+            continue
+        if not source.startswith("http://") and not source.startswith("https://"):
+            continue
+
+        local_src = download_image(source, article["url"], image_dir)
+        if local_src != source:
+            image["data-original-src"] = source
+            image["src"] = local_src
+            image["data-src"] = local_src
+            changed = True
+
+    if changed:
+        article["content_html"] = str(root)
+
+    return article
+
+
 def fetch_article(url: str) -> dict[str, Any]:
     article_id = article_id_for_url(url)
     filename = f"{article_id}.html"
@@ -224,6 +315,7 @@ def fetch_article(url: str) -> dict[str, Any]:
 def ensure_dirs() -> None:
     ARTICLES_DIR.mkdir(parents=True, exist_ok=True)
     ASSETS_DIR.mkdir(parents=True, exist_ok=True)
+    IMAGES_DIR.mkdir(parents=True, exist_ok=True)
     PUBLIC_DATA_DIR.mkdir(parents=True, exist_ok=True)
     for old_article in ARTICLES_DIR.glob("*.html"):
         old_article.unlink()
@@ -664,6 +756,7 @@ def build() -> None:
         article = fetch_article(url)
         if not article.get("success") and url in cached_articles:
             article = cached_articles[url]
+        article = localize_article_images(article)
         articles.append(article)
         write_article_page(article)
 
