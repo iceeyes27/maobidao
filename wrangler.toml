@@ -1,0 +1,7 @@
+name = "maobidao"
+main = "worker.js"
+compatibility_date = "2026-05-27"
+
+[assets]
+directory = "./public"
+binding = "ASSETS"

@@ -43,6 +43,8 @@
 
 Cloudflare Pages 发布目录设置为 `public`。
 
+如果使用 Cloudflare Workers Static Assets 的 Git 同步部署，本仓库也提供了 `wrangler.toml` 和 `worker.js`。静态资源仍从 `public/` 发布，`/api/submit` 由 Worker 入口转发到同一套提交逻辑。
+
 ## 本地运行
 
 安装依赖：
@@ -118,6 +120,28 @@ Build output directory: public
 ```text
 POST /api/submit
 ```
+
+## Cloudflare Workers Static Assets 部署
+
+如果部署后的域名是 `*.workers.dev`，通常说明项目走的是 Workers Static Assets。此时 Cloudflare 会读取仓库根目录的 `wrangler.toml`：
+
+```toml
+main = "worker.js"
+
+[assets]
+directory = "./public"
+binding = "ASSETS"
+```
+
+`worker.js` 会把 `/api/submit` 转发给 `functions/api/submit.js`，其他路径交给 `public/` 静态资源。
+
+部署后可以访问：
+
+```text
+/api/submit
+```
+
+如果返回 `Submit API 已部署，环境变量已配置。`，说明函数和变量都已生效。
 
 ## Pages Functions 环境变量
 
