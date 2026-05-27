@@ -1,0 +1,44 @@
+name: Build WeChat Archive Site
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "scripts/**"
+      - "data/**"
+      - "urls.txt"
+      - "public/submit.html"
+      - ".github/workflows/build.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    if: github.actor != 'github-actions[bot]'
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Build static site
+        run: python scripts/wechat_to_site.py
+
+      - name: Commit generated files
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          git add public data urls.txt
+          git diff --cached --quiet || git commit -m "Update archive site"
+          git push
