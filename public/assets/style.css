@@ -145,6 +145,12 @@ button:disabled {
   overflow-wrap: anywhere;
 }
 
+.article-body #js_content,
+.article-body .rich_media_content {
+  visibility: visible !important;
+  opacity: 1 !important;
+}
+
 .article-body img,
 .article-body video,
 .article-body iframe {

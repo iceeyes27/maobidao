@@ -98,6 +98,23 @@ def load_urls() -> list[str]:
     return urls
 
 
+def load_cached_articles() -> dict[str, dict[str, Any]]:
+    data = read_json_file(ARTICLES_JSON, {"articles": []})
+    articles = data.get("articles", [])
+    cached: dict[str, dict[str, Any]] = {}
+
+    if not isinstance(articles, list):
+        return cached
+
+    for article in articles:
+        if not isinstance(article, dict):
+            continue
+        url = article.get("url", "")
+        if url and article.get("success"):
+            cached[url] = article
+    return cached
+
+
 def article_id_for_url(url: str) -> str:
     return hashlib.md5(url.encode("utf-8")).hexdigest()
 
@@ -115,7 +132,7 @@ def parse_publish_time(page: str) -> str:
     if not ct:
         return ""
     try:
-        return datetime.fromtimestamp(int(ct)).strftime("%Y-%m-%d %H:%M:%S")
+        return datetime.utcfromtimestamp(int(ct)).strftime("%Y-%m-%d %H:%M:%S")
     except (TypeError, ValueError, OSError):
         return ""
 
@@ -176,6 +193,8 @@ def fetch_article(url: str) -> dict[str, Any]:
     if content_el:
         for script_or_style in content_el.select("script, style"):
             script_or_style.decompose()
+        content_el.attrs.pop("style", None)
+        content_el.attrs.pop("hidden", None)
         for image in content_el.select("img"):
             if not image.get("src"):
                 source = image.get("data-src") or image.get("data-original")
@@ -357,6 +376,12 @@ button:disabled {
 .article-body {
   margin-top: 24px;
   overflow-wrap: anywhere;
+}
+
+.article-body #js_content,
+.article-body .rich_media_content {
+  visibility: visible !important;
+  opacity: 1 !important;
 }
 
 .article-body img,
@@ -626,6 +651,7 @@ def write_articles_json(articles: list[dict[str, Any]]) -> None:
 
 
 def build() -> None:
+    cached_articles = load_cached_articles()
     ensure_dirs()
     write_style()
     write_submit_page()
@@ -636,6 +662,8 @@ def build() -> None:
         if index > 0:
             time.sleep(2)
         article = fetch_article(url)
+        if not article.get("success") and url in cached_articles:
+            article = cached_articles[url]
         articles.append(article)
         write_article_page(article)
 
