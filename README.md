@@ -143,9 +143,12 @@ binding = "ASSETS"
 
 如果返回 `Submit API 已部署，环境变量已配置。`，说明函数和变量都已生效。
 
-## Pages Functions 环境变量
+## Cloudflare 运行时环境变量
 
-在 Cloudflare Pages 项目中配置：
+按实际部署类型配置运行时变量：
+
+- Cloudflare Pages：在 Pages 项目的生产环境变量中配置。
+- Workers Static Assets：在对应 Worker 的 Variables and Secrets 中配置。
 
 ```text
 GITHUB_TOKEN
@@ -165,6 +168,8 @@ SUBMIT_PASSWORD
 
 `GITHUB_TOKEN` 只在 Pages Function 后端使用，不会出现在前端源码中。
 
+如果项目使用 Workers Static Assets，本仓库的 `wrangler.toml` 已设置 `keep_vars = true`，避免后续部署覆盖在 Cloudflare 面板配置的变量。
+
 ## 通过提交页添加链接
 
 访问：
@@ -183,7 +188,7 @@ SUBMIT_PASSWORD
 
 ### 提交返回服务端配置不完整
 
-检查 `GITHUB_TOKEN`、`GITHUB_OWNER`、`GITHUB_REPO`、`SUBMIT_PASSWORD` 是否都已配置。`GITHUB_BRANCH` 可选，默认是 `main`。
+检查 `GITHUB_TOKEN`、`GITHUB_OWNER`、`GITHUB_REPO`、`SUBMIT_PASSWORD` 是否都已在当前生产运行环境配置。`GITHUB_BRANCH` 可选，默认是 `main`。如果是 Workers Static Assets，还要确认变量配置在 Worker 项目上，而不是只配置在 Pages 项目或构建环境中。
 
 ### 提交成功但网站没有更新
 
