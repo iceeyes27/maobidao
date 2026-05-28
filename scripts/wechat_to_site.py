@@ -8,7 +8,7 @@ import html
 import json
 import re
 import time
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
@@ -134,9 +134,24 @@ def parse_publish_time(page: str) -> str:
     if not ct:
         return ""
     try:
-        return datetime.utcfromtimestamp(int(ct)).strftime("%Y-%m-%d %H:%M:%S")
+        return datetime.fromtimestamp(int(ct), UTC).strftime("%Y-%m-%d %H:%M:%S")
     except (TypeError, ValueError, OSError):
         return ""
+
+
+def parse_article_time(value: str) -> datetime:
+    try:
+        return datetime.strptime(value, "%Y-%m-%d %H:%M:%S")
+    except (TypeError, ValueError):
+        return datetime.min
+
+
+def sort_articles_by_publish_time(articles: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return sorted(
+        articles,
+        key=lambda article: parse_article_time(article.get("publish_time", "")),
+        reverse=True,
+    )
 
 
 def clean_text(value: str) -> str:
@@ -760,6 +775,7 @@ def build() -> None:
         articles.append(article)
         write_article_page(article)
 
+    articles = sort_articles_by_publish_time(articles)
     write_index(articles)
     write_articles_json(articles)
 

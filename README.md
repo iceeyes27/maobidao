@@ -168,7 +168,7 @@ SUBMIT_PASSWORD
 
 `GITHUB_TOKEN` 只在 Pages Function 后端使用，不会出现在前端源码中。
 
-如果项目使用 Workers Static Assets，本仓库的 `wrangler.toml` 已设置 `keep_vars = true`，避免后续部署覆盖在 Cloudflare 面板配置的变量。
+如果项目使用 Workers Static Assets，`GITHUB_OWNER`、`GITHUB_REPO`、`GITHUB_BRANCH` 已写入 `wrangler.toml`。只需要在 Cloudflare Worker 的 Variables and Secrets 中添加两个 secret：`GITHUB_TOKEN`、`SUBMIT_PASSWORD`。
 
 ## 通过提交页添加链接
 
@@ -188,7 +188,7 @@ SUBMIT_PASSWORD
 
 ### 提交返回服务端配置不完整
 
-检查 `GITHUB_TOKEN`、`GITHUB_OWNER`、`GITHUB_REPO`、`SUBMIT_PASSWORD` 是否都已在当前生产运行环境配置。`GITHUB_BRANCH` 可选，默认是 `main`。如果是 Workers Static Assets，还要确认变量配置在 Worker 项目上，而不是只配置在 Pages 项目或构建环境中。
+检查当前生产运行环境是否有 `GITHUB_TOKEN`、`SUBMIT_PASSWORD` 两个 secret。如果是 Pages 部署，还要配置 `GITHUB_OWNER`、`GITHUB_REPO`；如果是 Workers Static Assets，这两个值已由 `wrangler.toml` 提供。
 
 ### 提交成功但网站没有更新
 

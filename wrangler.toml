@@ -3,6 +3,14 @@ main = "worker.js"
 compatibility_date = "2026-05-27"
 keep_vars = true
 
+[vars]
+GITHUB_OWNER = "iceeyes27"
+GITHUB_REPO = "maobidao"
+GITHUB_BRANCH = "main"
+
+[secrets]
+required = ["GITHUB_TOKEN", "SUBMIT_PASSWORD"]
+
 [assets]
 directory = "./public"
 binding = "ASSETS"
