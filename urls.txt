@@ -1,3 +1,5 @@
-# 每行一个公开微信公众号文章链接。
+# 每行一个公开文章链接。
+# 支持通用网页，优先适配微信公众号文章。
 # 示例：
 # https://mp.weixin.qq.com/s/example
+# https://example.com/article

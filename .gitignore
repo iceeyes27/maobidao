@@ -5,3 +5,5 @@ __pycache__/
 venv/
 node_modules/
 .wrangler/
+wechat_watcher.local.json
+.wechat_watcher_state.json

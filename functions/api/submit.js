@@ -1,5 +1,4 @@
 const MAX_LINKS_PER_SUBMIT = 50;
-const WECHAT_PREFIX = "https://mp.weixin.qq.com/";
 const LINKS_PATH = "data/links.json";
 
 function jsonResponse(body, status = 200) {
@@ -21,7 +20,12 @@ function normalizeLink(link) {
 }
 
 function isValidLink(link) {
-  return link.startsWith(WECHAT_PREFIX);
+  try {
+    const url = new URL(link);
+    return url.protocol === "http:" || url.protocol === "https:";
+  } catch {
+    return false;
+  }
 }
 
 function uniqueValidLinks(links) {
@@ -198,7 +202,7 @@ export async function onRequest({ request, env }) {
 
   const links = uniqueValidLinks(payload.links);
   if (links.length === 0) {
-    return jsonResponse({ success: false, message: "没有有效的微信公众号文章链接。" }, 400);
+    return jsonResponse({ success: false, message: "没有有效的文章链接。" }, 400);
   }
 
   try {

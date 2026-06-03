@@ -3,15 +3,15 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>提交微信公众号文章链接</title>
+  <title>提交文章链接</title>
   <link rel="stylesheet" href="/assets/style.css">
 </head>
 <body>
   <main class="site">
     <section class="panel">
       <header class="site-header">
-        <h1 class="site-title">提交微信公众号文章链接</h1>
-        <p class="site-desc">请每行粘贴一个微信公众号文章链接。提交后系统会自动更新链接库，稍后重新生成归档网站。</p>
+        <h1 class="site-title">提交文章链接</h1>
+        <p class="site-desc">请每行粘贴一个公开文章链接。支持通用网页，优先适配微信公众号文章。提交后系统会自动更新链接库，稍后重新生成归档网站。</p>
       </header>
 
       <form id="submit-form">
@@ -19,7 +19,7 @@
         <input id="password" name="password" type="password" autocomplete="current-password" required>
 
         <label for="links">文章链接</label>
-        <textarea id="links" name="links" placeholder="https://mp.weixin.qq.com/s/..." required></textarea>
+        <textarea id="links" name="links" placeholder="https://example.com/article" required></textarea>
 
         <div class="toolbar">
           <button id="submit-button" type="submit">提交</button>
@@ -34,7 +34,15 @@
     const form = document.querySelector("#submit-form");
     const button = document.querySelector("#submit-button");
     const result = document.querySelector("#result");
-    const prefix = "https://mp.weixin.qq.com/";
+
+    function isValidLink(value) {
+      try {
+        const url = new URL(value);
+        return url.protocol === "http:" || url.protocol === "https:";
+      } catch {
+        return false;
+      }
+    }
 
     function setResult(message, ok) {
       result.textContent = message;
@@ -49,7 +57,7 @@
         .map((line) => line.trim())
         .filter(Boolean);
       const links = [...new Set(rawLinks)];
-      const invalid = links.filter((link) => !link.startsWith(prefix));
+      const invalid = links.filter((link) => !isValidLink(link));
 
       if (!password) {
         setResult("请输入管理密码。", false);
@@ -60,7 +68,7 @@
         return;
       }
       if (invalid.length > 0) {
-        setResult("存在非微信公众号文章链接，请检查后重试。", false);
+        setResult("存在无效链接，请检查后重试。", false);
         return;
       }
 

@@ -1,0 +1,14 @@
+{
+  "profile_ext_url": "https://mp.weixin.qq.com/mp/profile_ext?action=getmsg&__biz=PASTE_BIZ&f=json&offset=0&count=10&is_ok=1&scene=124&uin=PASTE_UIN&key=PASTE_KEY&pass_ticket=PASTE_PASS_TICKET&wxtoken=&appmsg_token=PASTE_APPMSG_TOKEN&x5=0&f=json",
+  "headers": {
+    "User-Agent": "Mozilla/5.0",
+    "Referer": "https://mp.weixin.qq.com/",
+    "Cookie": "PASTE_BROWSER_COOKIE"
+  },
+  "submit_url": "https://YOUR_DOMAIN/api/submit",
+  "submit_password": "PASTE_SUBMIT_PASSWORD",
+  "interval_seconds": 1800,
+  "max_pages": 1,
+  "timeout_seconds": 20,
+  "page_pause_seconds": 1
+}

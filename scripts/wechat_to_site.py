@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build a static archive site from manually submitted WeChat article URLs."""
+"""Build a static archive site from submitted article URLs, with strong WeChat support."""
 
 from __future__ import annotations
 
@@ -11,10 +11,10 @@ import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urljoin, urlparse
 
 import requests
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, FeatureNotFound
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -48,12 +48,22 @@ def read_json_file(path: Path, default: Any) -> Any:
         return default
 
 
-def is_valid_wechat_url(url: str) -> bool:
+def is_wechat_url(url: str) -> bool:
     return url.strip().startswith(WECHAT_PREFIX)
+
+
+def is_valid_article_url(url: str) -> bool:
+    parsed = urlparse(url.strip())
+    return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
 
 
 def normalize_url(url: str) -> str:
     return url.strip()
+
+
+def source_host(url: str) -> str:
+    host = urlparse(url).netloc.lower()
+    return host.removeprefix("www.")
 
 
 def read_links_from_json() -> list[str]:
@@ -93,7 +103,7 @@ def load_urls() -> list[str]:
     urls: list[str] = []
     for url in [*read_links_from_json(), *read_links_from_txt()]:
         normalized = normalize_url(url)
-        if not is_valid_wechat_url(normalized) or normalized in seen:
+        if not is_valid_article_url(normalized) or normalized in seen:
             continue
         seen.add(normalized)
         urls.append(normalized)
@@ -225,8 +235,8 @@ def localize_article_images(article: dict[str, Any]) -> dict[str, Any]:
     if not article.get("success") or not article.get("content_html"):
         return article
 
-    soup = BeautifulSoup(article["content_html"], "lxml")
-    root = soup.select_one("#js_content") or soup.find("div")
+    soup = parse_html(article["content_html"])
+    root = soup.select_one("#js_content, article, main, body") or soup.find("div")
     if not root:
         return article
 
@@ -235,7 +245,7 @@ def localize_article_images(article: dict[str, Any]) -> dict[str, Any]:
 
     changed = False
     for image in root.select("img"):
-        source = image.get("src") or image.get("data-src") or image.get("data-original")
+        source = image.get("src") or image.get("data-src") or image.get("data-original") or image.get("data-lazy-src")
         if not source or source.startswith("/assets/images/"):
             continue
         if not source.startswith("http://") and not source.startswith("https://"):
@@ -254,6 +264,204 @@ def localize_article_images(article: dict[str, Any]) -> dict[str, Any]:
     return article
 
 
+def clean_node(node: Any, base_url: str) -> None:
+    for element in node.select("script, style, noscript"):
+        element.decompose()
+    for element in node.select("mp-common-miniprogram, mp-sponsor-ad, mp-style-type"):
+        element.decompose()
+    for element in node.select("section:empty, p:empty"):
+        element.decompose()
+    for element in node.select("a.js_weapp_entry, a.weapp_image_link, a.weapp_text_link"):
+        element.unwrap()
+    for element in node.select("[hidden]"):
+        element.attrs.pop("hidden", None)
+    for image in node.select("img"):
+        source = image.get("src") or image.get("data-src") or image.get("data-original") or image.get("data-lazy-src")
+        if source:
+            image["src"] = urljoin(base_url, source)
+        image["loading"] = image.get("loading") or "lazy"
+    for link in node.select("a[href]"):
+        link["href"] = urljoin(base_url, link.get("href", ""))
+    remove_empty_blocks(node)
+
+
+def remove_empty_blocks(node: Any) -> None:
+    for element in list(node.select("section, p, div")):
+        if element.select_one("img, video, iframe"):
+            continue
+        if not clean_text(element.get_text(" ", strip=True)):
+            element.decompose()
+
+
+PROMO_MARKERS = (
+    "点击直达",
+    "长按识别二维码",
+    "百亿补贴",
+    "同款好物",
+    "拼多多搜",
+    "二维码",
+)
+
+PROMO_SOFT_MARKERS = (
+    "官网价",
+    "大促价",
+    "元起",
+    "补贴",
+    "券包",
+    "会场",
+)
+
+
+def block_promo_score(text: str) -> int:
+    score = sum(3 for marker in PROMO_MARKERS if marker in text)
+    score += sum(1 for marker in PROMO_SOFT_MARKERS if marker in text)
+    if "拼多多" in text:
+        score += 2
+    if "iPhone" in text or "MacBook" in text or "茅台" in text:
+        score += 1
+    return score
+
+
+def prune_wechat_tail(node: Any) -> None:
+    blocks = [child for child in node.children if getattr(child, "name", None)]
+    if not blocks:
+        return
+
+    cumulative_text = 0
+    promo_run = 0
+    cutoff = None
+
+    for index, block in enumerate(blocks):
+        text = clean_text(block.get_text(" ", strip=True))
+        text_len = len(text)
+        score = block_promo_score(text)
+
+        if score > 0:
+            promo_run += score
+        else:
+            promo_run = 0
+
+        if cumulative_text >= 1200 and (score >= 5 or promo_run >= 8):
+            cutoff = index
+            break
+
+        cumulative_text += text_len
+
+    if cutoff is None:
+        return
+
+    for block in blocks[cutoff:]:
+        block.decompose()
+
+def extract_wechat_content(soup: BeautifulSoup, page: str, url: str) -> dict[str, Any]:
+    title_el = soup.select_one("#activity-name")
+    account_el = soup.select_one("#js_name")
+    content_el = soup.select_one("#js_content")
+
+    title = clean_text(title_el.get_text(" ", strip=True)) if title_el else ""
+    if not title:
+        title = meta_content(soup, 'meta[property="og:title"]')
+    account_name = clean_text(account_el.get_text(" ", strip=True)) if account_el else ""
+    if not account_name:
+        account_name = extract_script_string(page, "nickname")
+
+    content_html = ""
+    content_text = ""
+    if content_el:
+        clean_node(content_el, url)
+        prune_wechat_tail(content_el)
+        remove_empty_blocks(content_el)
+        content_html = str(content_el)
+        content_text = clean_text(content_el.get_text(" ", strip=True))
+
+    return {
+        "title": title or "未命名文章",
+        "account_name": account_name,
+        "publish_time": parse_publish_time(page),
+        "content_text": content_text,
+        "content_html": content_html,
+        "success": bool(content_el),
+        "error": "" if content_el else "未找到微信公众号正文内容 #js_content",
+        "source_name": "微信公众号",
+        "source_host": source_host(url),
+    }
+
+
+def first_meta_content(soup: BeautifulSoup, selectors: list[str]) -> str:
+    for selector in selectors:
+        value = meta_content(soup, selector)
+        if value:
+            return value
+    return ""
+
+
+def extract_generic_content(soup: BeautifulSoup, url: str) -> dict[str, Any]:
+    title = first_meta_content(soup, [
+        'meta[property="og:title"]',
+        'meta[name="twitter:title"]',
+    ])
+    if not title and soup.title and soup.title.string:
+        title = clean_text(soup.title.string)
+
+    author = first_meta_content(soup, [
+        'meta[name="author"]',
+        'meta[property="article:author"]',
+    ])
+    publish_time = first_meta_content(soup, [
+        'meta[property="article:published_time"]',
+        'meta[name="publish_date"]',
+        'meta[name="pubdate"]',
+        'meta[itemprop="datePublished"]',
+        'time[datetime]',
+    ])
+
+    candidates = [
+        "article",
+        "main article",
+        "[itemprop='articleBody']",
+        ".post-content",
+        ".entry-content",
+        ".article-content",
+        ".article-body",
+        ".rich-text",
+        "main",
+        ".content",
+        "#content",
+        "body",
+    ]
+    content_el = None
+    for selector in candidates:
+        candidate = soup.select_one(selector)
+        if candidate and len(clean_text(candidate.get_text(" ", strip=True))) >= 80:
+            content_el = candidate
+            break
+
+    content_html = ""
+    content_text = ""
+    if content_el:
+        clean_node(content_el, url)
+        content_html = str(content_el)
+        content_text = clean_text(content_el.get_text(" ", strip=True))
+
+    return {
+        "title": title or "未命名文章",
+        "account_name": author,
+        "publish_time": publish_time,
+        "content_text": content_text,
+        "content_html": content_html,
+        "success": bool(content_el),
+        "error": "" if content_el else "未找到可归档的正文内容",
+        "source_name": source_host(url),
+        "source_host": source_host(url),
+    }
+
+def parse_html(page: str) -> BeautifulSoup:
+    try:
+        return BeautifulSoup(page, "lxml")
+    except FeatureNotFound:
+        return BeautifulSoup(page, "html.parser")
+
+
 def fetch_article(url: str) -> dict[str, Any]:
     article_id = article_id_for_url(url)
     filename = f"{article_id}.html"
@@ -264,6 +472,8 @@ def fetch_article(url: str) -> dict[str, Any]:
         "filename": filename,
         "title": "",
         "account_name": "",
+        "source_name": "",
+        "source_host": source_host(url),
         "publish_time": "",
         "content_text": "",
         "content_html": "",
@@ -283,48 +493,12 @@ def fetch_article(url: str) -> dict[str, Any]:
         base["error"] = f"请求失败：{exc.__class__.__name__}"
         return base
 
-    soup = BeautifulSoup(response.text, "lxml")
-
-    title_el = soup.select_one("#activity-name")
-    account_el = soup.select_one("#js_name")
-    content_el = soup.select_one("#js_content")
-
-    title = clean_text(title_el.get_text(" ", strip=True)) if title_el else ""
-    if not title:
-        title = meta_content(soup, 'meta[property="og:title"]')
-    account_name = clean_text(account_el.get_text(" ", strip=True)) if account_el else ""
-    if not account_name:
-        account_name = extract_script_string(response.text, "nickname")
-
-    if content_el:
-        for script_or_style in content_el.select("script, style"):
-            script_or_style.decompose()
-        content_el.attrs.pop("style", None)
-        content_el.attrs.pop("hidden", None)
-        for image in content_el.select("img"):
-            if not image.get("src"):
-                source = image.get("data-src") or image.get("data-original")
-                if source:
-                    image["src"] = source
-            image["loading"] = image.get("loading") or "lazy"
-        content_html = str(content_el)
-        content_text = clean_text(content_el.get_text(" ", strip=True))
-    else:
-        content_html = ""
-        content_text = ""
-
-    base.update(
-        {
-            "title": title or "未命名文章",
-            "account_name": account_name,
-            "publish_time": parse_publish_time(response.text),
-            "content_text": content_text,
-            "content_html": content_html,
-            "success": bool(content_el),
-            "error": "" if content_el else "未找到正文内容 #js_content",
-        }
-    )
+    soup = parse_html(response.text)
+    article = extract_wechat_content(soup, response.text, url) if is_wechat_url(url) else extract_generic_content(soup, url)
+    base.update(article)
     return base
+
+
 
 
 def ensure_dirs() -> None:
@@ -501,6 +675,26 @@ button:disabled {
   height: auto;
 }
 
+.source-card {
+  margin: 16px 0 20px;
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #f8fafc;
+}
+
+.source-card strong {
+  display: block;
+  margin-bottom: 6px;
+}
+
+.source-card span,
+.source-card a {
+  display: block;
+  margin-top: 4px;
+  overflow-wrap: anywhere;
+}
+
 label {
   display: block;
   margin: 18px 0 8px;
@@ -572,10 +766,35 @@ def page_shell(title: str, body: str) -> str:
 """
 
 
+def detail_source_card(article: dict[str, Any]) -> str:
+    host = article.get("source_host") or source_host(article.get("url", ""))
+    if not host:
+        return ""
+
+    lines = ["<strong>原文来源</strong>"]
+    is_wechat = article.get("source_name") == "微信公众号" or host == "mp.weixin.qq.com"
+    if is_wechat and article.get("account_name"):
+        lines.append(f"<span>公众号：{html.escape(article['account_name'])}</span>")
+    elif article.get("account_name"):
+        lines.append(f"<span>作者：{html.escape(article['account_name'])}</span>")
+    lines.append(f"<span>站点：{html.escape(host)}</span>")
+    lines.append(
+        f'<a href="{html.escape(article["url"], quote=True)}" target="_blank" rel="noopener noreferrer">查看原文</a>'
+    )
+    return "\n        ".join(lines)
+
+
 def article_meta(article: dict[str, Any]) -> str:
     parts = []
-    if article.get("account_name"):
-        parts.append(f"<span>公众号：{html.escape(article['account_name'])}</span>")
+    host = article.get("source_host") or source_host(article.get("url", ""))
+    is_wechat = article.get("source_name") == "微信公众号" or host == "mp.weixin.qq.com"
+    if is_wechat:
+        if article.get("account_name"):
+            parts.append(f"<span>公众号：{html.escape(article['account_name'])}</span>")
+    elif article.get("account_name"):
+        parts.append(f"<span>作者：{html.escape(article['account_name'])}</span>")
+    if host and not is_wechat:
+        parts.append(f"<span>来源：{html.escape(host)}</span>")
     if article.get("publish_time"):
         parts.append(f"<span>发布时间：{html.escape(article['publish_time'])}</span>")
     if article.get("fetched_at"):
@@ -611,11 +830,11 @@ def write_index(articles: list[dict[str, Any]]) -> None:
     if items:
         list_html = '<ul class="article-list">\n' + "\n".join(items) + "\n    </ul>"
     else:
-        list_html = '<p class="empty">暂无文章。请通过提交页添加公开微信公众号文章链接。</p>'
+        list_html = '<p class="empty">暂无文章。请通过提交页添加公开文章链接。</p>'
 
     body = f"""    <header class="site-header">
-      <h1 class="site-title">微信公众号文章归档</h1>
-      <p class="site-desc">手动提交的公开微信公众号文章链接归档。</p>
+      <h1 class="site-title">文章归档</h1>
+      <p class="site-desc">手动提交的公开文章链接归档，优先适配微信公众号文章。</p>
       <div class="toolbar">
         <span class="meta">共 {len(articles)} 条链接，成功归档 {successful_count} 篇</span>
         <a class="button secondary" href="/submit.html">提交新文章链接</a>
@@ -624,13 +843,15 @@ def write_index(articles: list[dict[str, Any]]) -> None:
     <section class="panel">
 {list_html}
     </section>"""
-    (PUBLIC / "index.html").write_text(page_shell("微信公众号文章归档", body), encoding="utf-8")
+    (PUBLIC / "index.html").write_text(page_shell("文章归档", body), encoding="utf-8")
 
 
 def write_article_page(article: dict[str, Any]) -> None:
     title = html.escape(article.get("title") or "未命名文章")
     original_href = html.escape(article["url"], quote=True)
     content_html = article.get("content_html") or ""
+    source_card = detail_source_card(article)
+    source_card_html = f"      <div class=\"source-card\">\n        {source_card}\n      </div>" if source_card else ""
     if not article.get("success"):
         error = html.escape(article.get("error") or "抓取失败")
         content_html = f'<p class="result error">{error}</p>'
@@ -641,6 +862,7 @@ def write_article_page(article: dict[str, Any]) -> None:
       <div class="meta">
         {article_meta(article)}
       </div>
+{source_card_html}
       <div class="article-body">
 {content_html}
       </div>
@@ -655,15 +877,15 @@ def write_submit_page() -> None:
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>提交微信公众号文章链接</title>
+  <title>提交文章链接</title>
   <link rel="stylesheet" href="/assets/style.css">
 </head>
 <body>
   <main class="site">
     <section class="panel">
       <header class="site-header">
-        <h1 class="site-title">提交微信公众号文章链接</h1>
-        <p class="site-desc">请每行粘贴一个微信公众号文章链接。提交后系统会自动更新链接库，稍后重新生成归档网站。</p>
+        <h1 class="site-title">提交文章链接</h1>
+        <p class="site-desc">请每行粘贴一个公开文章链接。支持通用网页，优先适配微信公众号文章。提交后系统会自动更新链接库，稍后重新生成归档网站。</p>
       </header>
 
       <form id="submit-form">
@@ -671,7 +893,7 @@ def write_submit_page() -> None:
         <input id="password" name="password" type="password" autocomplete="current-password" required>
 
         <label for="links">文章链接</label>
-        <textarea id="links" name="links" placeholder="https://mp.weixin.qq.com/s/..." required></textarea>
+        <textarea id="links" name="links" placeholder="https://example.com/article" required></textarea>
 
         <div class="toolbar">
           <button id="submit-button" type="submit">提交</button>
@@ -686,7 +908,15 @@ def write_submit_page() -> None:
     const form = document.querySelector("#submit-form");
     const button = document.querySelector("#submit-button");
     const result = document.querySelector("#result");
-    const prefix = "https://mp.weixin.qq.com/";
+
+    function isValidLink(value) {
+      try {
+        const url = new URL(value);
+        return url.protocol === "http:" || url.protocol === "https:";
+      } catch {
+        return false;
+      }
+    }
 
     function setResult(message, ok) {
       result.textContent = message;
@@ -701,7 +931,7 @@ def write_submit_page() -> None:
         .map((line) => line.trim())
         .filter(Boolean);
       const links = [...new Set(rawLinks)];
-      const invalid = links.filter((link) => !link.startsWith(prefix));
+      const invalid = links.filter((link) => !isValidLink(link));
 
       if (!password) {
         setResult("请输入管理密码。", false);
@@ -712,7 +942,7 @@ def write_submit_page() -> None:
         return;
       }
       if (invalid.length > 0) {
-        setResult("存在非微信公众号文章链接，请检查后重试。", false);
+        setResult("存在无效链接，请检查后重试。", false);
         return;
       }
 

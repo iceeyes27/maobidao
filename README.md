@@ -1,18 +1,16 @@
-# 微信公众号文章链接归档网站
+# 文章链接归档网站
 
-这是一个部署在 Cloudflare Pages 上的静态归档网站，用于保存用户手动提交的公开微信公众号文章链接，并通过 GitHub Actions 生成静态网页。
+这是一个部署在 Cloudflare Pages 上的静态归档网站，用于保存用户手动提交的公开文章链接，并通过 GitHub Actions 生成静态网页。
 
 ## 功能边界
 
-本项目仅用于用户手动提交的公开微信公众号文章链接归档。
+本项目用于归档用户提交的公开文章链接，**优先适配微信公众号文章**，也提供可选的本地监听导入脚本。
 
-不支持自动扫描公众号历史文章。  
 不支持模拟微信登录。  
 不支持抓取评论。  
 不支持抓取阅读量、点赞数、在看数。  
-不使用微信私有接口。
 
-本项目不会使用微信 Cookie、Token 或登录态，也不包含绕过微信反爬或风控的逻辑。
+核心网站不会保存微信 Cookie、Token 或登录态。可选的本地监听脚本只读取本机配置文件，不会把登录态提交到 GitHub 或 Cloudflare。
 
 ## 目录结构
 
@@ -24,7 +22,8 @@
 ├── data/
 │   └── links.json
 ├── scripts/
-│   └── wechat_to_site.py
+│   ├── wechat_to_site.py
+│   └── wechat_account_watcher.py
 ├── functions/
 │   └── api/
 │       └── submit.js
@@ -61,16 +60,48 @@ python scripts/wechat_to_site.py
 
 生成结果位于 `public/`。可以直接打开 `public/index.html` 查看归档首页。
 
+## 本地监听公众号新文章
+
+本地监听脚本可以定时读取已登录微信环境中的公众号历史列表请求，发现新文章后自动提交到 `/api/submit`。
+
+复制配置模板：
+
+```powershell
+Copy-Item wechat_watcher.example.json wechat_watcher.local.json
+```
+
+编辑 `wechat_watcher.local.json`：
+
+- `profile_ext_url`：公众号历史列表的 `mp/profile_ext?action=getmsg` 请求 URL。
+- `headers.Cookie`：同一次请求里的 Cookie。
+- `submit_url`：站点提交接口，例如 `https://你的域名/api/submit`。
+- `submit_password`：提交页管理密码。
+- `interval_seconds`：检查间隔，建议不低于 `1800`。
+
+单次检查：
+
+```bash
+python scripts/wechat_account_watcher.py --once
+```
+
+持续监听：
+
+```bash
+python scripts/wechat_account_watcher.py
+```
+
+`wechat_watcher.local.json` 和 `.wechat_watcher_state.json` 已加入 `.gitignore`。
+
 ## urls.txt 格式
 
 `urls.txt` 用于手动维护或本地兼容运行。每行一个链接：
 
 ```text
 https://mp.weixin.qq.com/s/xxxxxx
-https://mp.weixin.qq.com/s/yyyyyy
+https://example.com/article
 ```
 
-空行会被忽略，以 `#` 开头的注释行会被忽略。只有 `https://mp.weixin.qq.com/` 开头的链接会被处理。
+空行会被忽略，以 `#` 开头的注释行会被忽略。只有 `http://` 或 `https://` 开头的链接会被处理。
 
 ## data/links.json 格式
 
@@ -89,6 +120,12 @@ https://mp.weixin.qq.com/s/yyyyyy
 ```
 
 生成脚本会同时读取 `data/links.json` 和 `urls.txt`，合并去重后生成网站。
+
+## 抓取策略
+
+- 微信公众号文章：优先按微信页面结构提取标题、公众号名、发布时间和正文。
+- 其他网页文章：使用通用 HTML 结构做尽力抓取，效果取决于目标站点页面结构。
+- 单篇文章抓取失败不会影响其他文章，失败原因会显示在归档页中。
 
 ## GitHub Actions
 
@@ -178,7 +215,7 @@ SUBMIT_PASSWORD
 /submit.html
 ```
 
-输入管理密码，并在文本框中每行粘贴一个公开微信公众号文章链接。前端会做基础校验和去重，然后调用 `POST /api/submit`。提交成功后，Pages Function 会更新 GitHub 仓库中的 `data/links.json`，随后 GitHub Actions 会重新生成 `public/` 静态网站。
+输入管理密码，并在文本框中每行粘贴一个公开文章链接。前端会做基础校验和去重，然后调用 `POST /api/submit`。提交成功后，Pages Function 会更新 GitHub 仓库中的 `data/links.json`，随后 GitHub Actions 会重新生成 `public/` 静态网站。
 
 ## 常见问题排查
 
@@ -200,11 +237,11 @@ SUBMIT_PASSWORD
 
 ### 某篇文章抓取失败
 
-单篇文章抓取失败不会影响其他文章。失败信息会写入 `public/data/articles.json`，首页也会显示该条链接的失败状态。微信公众号页面可能因公开访问限制、临时网络问题或页面结构变化导致抓取失败。
+单篇文章抓取失败不会影响其他文章。失败信息会写入 `public/data/articles.json`，首页也会显示该条链接的失败状态。微信公众号页面可能因公开访问限制、临时网络问题或页面结构变化导致抓取失败；其他站点也可能因页面结构差异而无法完整提取正文。
 
 ### 首页没有文章
 
-检查 `data/links.json` 或 `urls.txt` 是否包含 `https://mp.weixin.qq.com/` 开头的链接，然后重新运行：
+检查 `data/links.json` 或 `urls.txt` 是否包含 `http://` 或 `https://` 开头的链接，然后重新运行：
 
 ```bash
 python scripts/wechat_to_site.py
