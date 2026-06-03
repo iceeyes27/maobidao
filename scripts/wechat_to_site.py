@@ -620,7 +620,7 @@ button:disabled {
 }
 
 .article-item {
-  padding: 22px 0;
+  padding: 24px 0;
   border-bottom: 1px solid var(--line);
 }
 
@@ -633,10 +633,32 @@ button:disabled {
   padding-bottom: 0;
 }
 
+.article-title-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
 .article-item h2 {
-  margin: 0 0 8px;
+  margin: 0;
   font-size: 22px;
   line-height: 1.35;
+}
+
+.source-badge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 26px;
+  padding: 0 10px;
+  border-radius: 999px;
+  background: #ecfdf5;
+  color: var(--accent-dark);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  flex-shrink: 0;
 }
 
 .meta {
@@ -647,11 +669,48 @@ button:disabled {
   font-size: 14px;
 }
 
+.article-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin: 0;
+  font-size: 13px;
+}
+
+.meta-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border: 1px solid #e5e7eb;
+  border-radius: 999px;
+  background: #f8fafc;
+  color: var(--text);
+}
+
+.meta-key {
+  color: var(--muted);
+}
+
+.meta-value {
+  color: var(--text);
+}
+
+.error-note {
+  margin: 10px 0 0;
+  color: var(--danger);
+  font-size: 14px;
+}
+
 .links {
   display: flex;
   flex-wrap: wrap;
   gap: 14px;
-  margin-top: 10px;
+  margin-top: 14px;
+}
+
+.links a {
+  font-weight: 500;
 }
 
 .article-body {
@@ -784,23 +843,47 @@ def detail_source_card(article: dict[str, Any]) -> str:
     return "\n        ".join(lines)
 
 
+def list_source_label(article: dict[str, Any]) -> str:
+    host = article.get("source_host") or source_host(article.get("url", ""))
+    is_wechat = article.get("source_name") == "微信公众号" or host == "mp.weixin.qq.com"
+    if is_wechat and article.get("account_name"):
+        return f"公众号 · {html.escape(article['account_name'])}"
+    if article.get("account_name"):
+        return f"作者 · {html.escape(article['account_name'])}"
+    if host:
+        return f"来源 · {html.escape(host)}"
+    return "来源未识别"
+
+
 def article_meta(article: dict[str, Any]) -> str:
     parts = []
     host = article.get("source_host") or source_host(article.get("url", ""))
     is_wechat = article.get("source_name") == "微信公众号" or host == "mp.weixin.qq.com"
     if is_wechat:
         if article.get("account_name"):
-            parts.append(f"<span>公众号：{html.escape(article['account_name'])}</span>")
+            parts.append(
+                f'<span class="meta-item"><span class="meta-key">公众号</span><span class="meta-value">{html.escape(article["account_name"])}</span></span>'
+            )
     elif article.get("account_name"):
-        parts.append(f"<span>作者：{html.escape(article['account_name'])}</span>")
+        parts.append(
+            f'<span class="meta-item"><span class="meta-key">作者</span><span class="meta-value">{html.escape(article["account_name"])}</span></span>'
+        )
     if host and not is_wechat:
-        parts.append(f"<span>来源：{html.escape(host)}</span>")
+        parts.append(
+            f'<span class="meta-item"><span class="meta-key">来源</span><span class="meta-value">{html.escape(host)}</span></span>'
+        )
     if article.get("publish_time"):
-        parts.append(f"<span>发布时间：{html.escape(article['publish_time'])}</span>")
+        parts.append(
+            f'<span class="meta-item"><span class="meta-key">发布时间</span><span class="meta-value">{html.escape(article["publish_time"])}</span></span>'
+        )
     if article.get("fetched_at"):
-        parts.append(f"<span>抓取时间：{html.escape(article['fetched_at'])}</span>")
+        parts.append(
+            f'<span class="meta-item"><span class="meta-key">抓取时间</span><span class="meta-value">{html.escape(article["fetched_at"])}</span></span>'
+        )
     if not article.get("success"):
-        parts.append(f"<span>状态：抓取失败</span>")
+        parts.append(
+            '<span class="meta-item"><span class="meta-key">状态</span><span class="meta-value">抓取失败</span></span>'
+        )
     return "\n        ".join(parts)
 
 
@@ -812,13 +895,17 @@ def write_index(articles: list[dict[str, Any]]) -> None:
         detail_href = f"/articles/{html.escape(article['filename'])}"
         original_href = html.escape(article["url"], quote=True)
         error = article.get("error", "")
-        error_html = f'<p class="meta">错误：{html.escape(error)}</p>' if error else ""
+        meta_html = article_meta(article)
+        meta_block = f'<div class="article-meta">\n          {meta_html}\n        </div>' if meta_html else ""
+        error_html = f'<p class="error-note">错误：{html.escape(error)}</p>' if error else ""
+        source_label = list_source_label(article)
         items.append(
             f"""      <li class="article-item">
-        <h2><a href="{detail_href}">{title}</a></h2>
-        <div class="meta">
-        {article_meta(article)}
+        <div class="article-title-row">
+          <h2><a href="{detail_href}">{title}</a></h2>
+          <span class="source-badge">{source_label}</span>
         </div>
+        {meta_block}
         {error_html}
         <div class="links">
           <a href="{detail_href}">查看归档页</a>
@@ -869,6 +956,7 @@ def write_article_page(article: dict[str, Any]) -> None:
       <p class="links"><a href="{original_href}" target="_blank" rel="noopener noreferrer">查看原文链接</a></p>
     </article>"""
     (ARTICLES_DIR / article["filename"]).write_text(page_shell(article.get("title") or "文章详情", body), encoding="utf-8")
+
 
 
 def write_submit_page() -> None:
