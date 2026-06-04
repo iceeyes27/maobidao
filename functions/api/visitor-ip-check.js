@@ -208,15 +208,21 @@ function buildAbuseResult(data) {
   };
 }
 
-function residentialDecisionFromUsageType(usageType) {
-  const code = String(usageType || "").toUpperCase();
-  if (!code) {
-    return null;
+function residentialDecisionFromUsageType(usageType, category) {
+  const usageTypeText = String(usageType || "").trim().toLowerCase();
+  const categoryText = String(category || "").trim().toLowerCase();
+  const usageTypeCode = String(usageType || "").trim().toUpperCase();
+
+  if (
+    usageTypeText === "data center/web hosting/transit"
+    || categoryText === "data centers"
+  ) {
+    return false;
   }
-  if (["ISP", "MOB"].includes(code)) {
+  if (["ISP", "MOB"].includes(usageTypeCode)) {
     return true;
   }
-  if (["DCH", "CDN", "SES", "CSP", "ORG", "EDU", "GOV", "MIL", "COM"].includes(code)) {
+  if (["DCH", "CDN", "SES", "CSP", "ORG", "EDU", "GOV", "MIL", "COM"].includes(usageTypeCode)) {
     return false;
   }
   return null;
@@ -224,12 +230,16 @@ function residentialDecisionFromUsageType(usageType) {
 
 function buildIp2LocationResult(data) {
   const usageType = data.usage_type || data.usageType || "";
-  const isResidential = residentialDecisionFromUsageType(usageType);
+  const category = data.category || "";
+  const isResidential = residentialDecisionFromUsageType(usageType, category);
   const label = isResidential === true ? "是" : isResidential === false ? "否" : "未知";
   const summaryParts = [];
 
   if (usageType) {
     summaryParts.push(`用途类型 ${usageType}`);
+  }
+  if (category) {
+    summaryParts.push(`分类 ${category}`);
   }
   if (data.connection_type) {
     summaryParts.push(`连接类型 ${data.connection_type}`);
@@ -247,6 +257,7 @@ function buildIp2LocationResult(data) {
     label,
     isResidential,
     usageType,
+    category,
     connectionType: data.connection_type || "",
     isp: data.isp || "",
     asn: data.asn || "",
