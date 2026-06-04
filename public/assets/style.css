@@ -333,17 +333,6 @@ textarea {
 }
 
 @media (max-width: 640px) {
-  .visitor-ip-header {
-    align-items: stretch;
-  }
-
-  .visitor-ip-header .button {
-    width: 100%;
-  }
-}
-
-
-@media (max-width: 640px) {
   .site {
     padding: 22px 12px 40px;
   }
