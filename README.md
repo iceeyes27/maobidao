@@ -26,7 +26,8 @@
 │   └── wechat_account_watcher.py
 ├── functions/
 │   └── api/
-│       └── submit.js
+│       ├── submit.js
+│       └── visitor-ip-check.js
 ├── public/
 │   ├── index.html
 │   ├── submit.html
@@ -42,7 +43,7 @@
 
 Cloudflare Pages 发布目录设置为 `public`。
 
-如果使用 Cloudflare Workers Static Assets 的 Git 同步部署，本仓库也提供了 `wrangler.toml` 和 `worker.js`。静态资源仍从 `public/` 发布，`/api/submit` 由 Worker 入口转发到同一套提交逻辑。
+如果使用 Cloudflare Workers Static Assets 的 Git 同步部署，本仓库也提供了 `wrangler.toml` 和 `worker.js`。静态资源仍从 `public/` 发布，`/api/submit` 与 `/api/visitor-ip-check` 都由 Worker 入口转发到同一套后端逻辑。
 
 ## 本地运行
 
@@ -152,10 +153,12 @@ Build command: 留空或不使用
 Build output directory: public
 ```
 
-保留 `functions/api/submit.js`，Cloudflare Pages 会将其作为 Pages Function 暴露为：
+保留 `functions/api/submit.js` 和 `functions/api/visitor-ip-check.js`，Cloudflare Pages 会将其作为 Pages Function 暴露为：
 
 ```text
 POST /api/submit
+GET /api/visitor-ip-check
+GET /api/visitor-ip-check?health=1
 ```
 
 ## Cloudflare Workers Static Assets 部署
@@ -170,15 +173,17 @@ directory = "./public"
 binding = "ASSETS"
 ```
 
-`worker.js` 会把 `/api/submit` 转发给 `functions/api/submit.js`，其他路径交给 `public/` 静态资源。
+`worker.js` 会把 `/api/submit` 和 `/api/visitor-ip-check` 转发给 `functions/api/` 下的接口，其他路径交给 `public/` 静态资源。
 
 部署后可以访问：
 
 ```text
 /api/submit
+/api/visitor-ip-check?health=1
 ```
 
-如果返回 `Submit API 已部署，环境变量已配置。`，说明函数和变量都已生效。
+如果 `/api/submit` 返回 `Submit API 已部署，环境变量已配置。`，说明提交通道已生效。  
+如果 `/api/visitor-ip-check?health=1` 返回 `Visitor IP Check API 已部署...`，说明访客 IP 检测接口已上线；即使缺少部分 key，接口仍可以返回当前访问者 IP。
 
 ## Cloudflare 运行时环境变量
 
@@ -193,6 +198,9 @@ GITHUB_OWNER
 GITHUB_REPO
 GITHUB_BRANCH
 SUBMIT_PASSWORD
+ABUSEIPDB_API_KEY
+IP2LOCATION_API_KEY
+IPDATA_API_KEY
 ```
 
 说明：
@@ -202,10 +210,44 @@ SUBMIT_PASSWORD
 - `GITHUB_REPO`：GitHub 仓库名。
 - `GITHUB_BRANCH`：通常是 `main`，未设置时默认使用 `main`。
 - `SUBMIT_PASSWORD`：提交页面管理密码。
+- `ABUSEIPDB_API_KEY`：AbuseIPDB 官方 API key。
+- `IP2LOCATION_API_KEY`：IP2Location 官方 API key。
+- `IPDATA_API_KEY`：ipdata 官方 API key。
 
-`GITHUB_TOKEN` 只在 Pages Function 后端使用，不会出现在前端源码中。
+`GITHUB_TOKEN` 和三方 IP 查询 key 都只在后端运行时使用，不会出现在前端源码中。
 
-如果项目使用 Workers Static Assets，`GITHUB_OWNER`、`GITHUB_REPO`、`GITHUB_BRANCH` 已写入 `wrangler.toml`。只需要在 Cloudflare Worker 的 Variables and Secrets 中添加两个 secret：`GITHUB_TOKEN`、`SUBMIT_PASSWORD`。
+如果项目使用 Workers Static Assets，`GITHUB_OWNER`、`GITHUB_REPO`、`GITHUB_BRANCH` 已写入 `wrangler.toml`。你至少需要在 Cloudflare Worker 的 Variables and Secrets 中添加 2 个必需 secret：`GITHUB_TOKEN`、`SUBMIT_PASSWORD`。如果你还想启用访客 IP 检测，再按需补充 3 个可选 secret：`ABUSEIPDB_API_KEY`、`IP2LOCATION_API_KEY`、`IPDATA_API_KEY`。
+
+这 3 个 IP 检测 key 可以按需逐步补齐：
+
+- 不配置任何 key：仍可显示当前访问者 IP 和大致位置。
+- 只配置部分 key：已配置的检测项正常返回，未配置项显示“未配置”。
+- 全部配置：滥用、家宽、风险三项都会完整检测。
+
+## 首页自动检测当前访问 IP
+
+```text
+/
+```
+
+页面加载后会自动请求 `/api/visitor-ip-check`，读取当前访问者公网 IP，并调用以下三方服务：
+
+- AbuseIPDB：检查是否存在滥用记录。
+- IP2Location：根据线路用途类型判断是否更接近家宽。
+- ipdata：检查代理、Tor、匿名网络、数据中心等风险标记。
+
+首页会展示：
+
+- 当前访问 IP
+- 访客大致位置（来自 Cloudflare 边缘）
+- 是否滥用
+- 是否家宽
+- IP 风险等级
+
+页面也提供“重新检测”按钮。
+
+> 注意：
+> 打开首页后，当前访问者公网 IP 会被发送到上述第三方服务查询安全信息。请确保这符合你的站点使用场景和隐私预期。
 
 ## 通过提交页添加链接
 
@@ -222,6 +264,14 @@ SUBMIT_PASSWORD
 ### 提交返回 401
 
 检查 `SUBMIT_PASSWORD` 是否已在 Cloudflare Pages 环境变量中正确配置，并确认页面输入的密码一致。
+
+### 访客 IP 检测返回服务端配置不完整
+
+现在缺少三方 key 时，接口不会再因为这个原因整体报错。它会继续返回当前访问者 IP，并把未配置的检测项标记为“未配置”。如果你想启用对应检测，再补上相应 key 即可。
+
+### 访客 IP 检测接口返回 400
+
+通常表示运行环境没有拿到可公开检测的访客公网 IP，例如本地模拟环境、某些代理链或请求头缺失。可以先访问 `/api/visitor-ip-check?health=1` 查看 Worker 实际识别到的 `visitor_ip`。
 
 ### 提交返回服务端配置不完整
 
@@ -246,3 +296,11 @@ SUBMIT_PASSWORD
 ```bash
 python scripts/wechat_to_site.py
 ```
+
+### 首页 IP 检测全部失败
+
+先访问 `/api/visitor-ip-check?health=1`，确认接口已部署。然后看返回里的 `missing_provider_keys`：
+
+- 如果有值，说明只是对应检测 key 还没配，页面仍然可以显示当前访问者 IP。
+- 如果为空但检测仍失败，再分别检查三家 key 是否有效、额度是否用尽，以及目标运行环境是否允许访问外部 API。
+

@@ -16,6 +16,40 @@
         <a class="button secondary" href="/submit.html">提交新文章链接</a>
       </div>
     </header>
+    <section class="panel visitor-ip-panel">
+      <div class="visitor-ip-header">
+        <div>
+          <h2 class="section-title">当前访问 IP 检测</h2>
+          <p class="help">打开页面后会自动检测当前访问者公网 IP，并发送到 AbuseIPDB、IP2Location、ipdata 查询安全信息。</p>
+        </div>
+        <button id="visitor-ip-refresh" type="button" class="button secondary">重新检测</button>
+      </div>
+      <div id="visitor-ip-status" class="result" role="status" aria-live="polite">正在检测当前访问 IP...</div>
+      <div id="visitor-ip-result" class="visitor-ip-result" hidden>
+        <div class="visitor-ip-summary">
+          <span class="meta-item"><span class="meta-key">当前 IP</span><span id="visitor-ip-value" class="meta-value">-</span></span>
+          <span class="meta-item"><span class="meta-key">位置</span><span id="visitor-ip-location" class="meta-value">-</span></span>
+          <span class="meta-item"><span class="meta-key">检测时间</span><span id="visitor-ip-checked-at" class="meta-value">-</span></span>
+        </div>
+        <div class="ip-check-grid">
+          <article class="ip-check-card">
+            <h3>是否滥用</h3>
+            <p id="visitor-ip-abuse-label" class="ip-check-value">-</p>
+            <p id="visitor-ip-abuse-summary" class="help">-</p>
+          </article>
+          <article class="ip-check-card">
+            <h3>是否家宽</h3>
+            <p id="visitor-ip-residential-label" class="ip-check-value">-</p>
+            <p id="visitor-ip-residential-summary" class="help">-</p>
+          </article>
+          <article class="ip-check-card">
+            <h3>IP 风险</h3>
+            <p id="visitor-ip-risk-label" class="ip-check-value">-</p>
+            <p id="visitor-ip-risk-summary" class="help">-</p>
+          </article>
+        </div>
+      </div>
+    </section>
     <section class="panel">
 <ul class="article-list">
       <li class="article-item">
@@ -267,5 +301,94 @@
     </ul>
     </section>
   </main>
+    <script>
+      const visitorIpStatus = document.querySelector("#visitor-ip-status");
+      const visitorIpResult = document.querySelector("#visitor-ip-result");
+      const visitorIpRefresh = document.querySelector("#visitor-ip-refresh");
+      const visitorIpElements = {
+        ip: document.querySelector("#visitor-ip-value"),
+        location: document.querySelector("#visitor-ip-location"),
+        checkedAt: document.querySelector("#visitor-ip-checked-at"),
+        abuseLabel: document.querySelector("#visitor-ip-abuse-label"),
+        abuseSummary: document.querySelector("#visitor-ip-abuse-summary"),
+        residentialLabel: document.querySelector("#visitor-ip-residential-label"),
+        residentialSummary: document.querySelector("#visitor-ip-residential-summary"),
+        riskLabel: document.querySelector("#visitor-ip-risk-label"),
+        riskSummary: document.querySelector("#visitor-ip-risk-summary"),
+      };
+
+      function setVisitorIpStatus(message, ok) {
+        visitorIpStatus.textContent = message;
+        visitorIpStatus.className = ok ? "result ok" : "result error";
+      }
+
+      function formatCheckedAt(value) {
+        if (!value) {
+          return "未知";
+        }
+        const date = new Date(value);
+        return Number.isNaN(date.getTime()) ? value : date.toLocaleString("zh-CN", { hour12: false });
+      }
+
+      function formatLocation(network) {
+        if (!network) {
+          return "未知";
+        }
+        const parts = [network.country, network.city, network.colo].filter((part) => part && part !== "未知");
+        return parts.length > 0 ? parts.join(" / ") : "未知";
+      }
+
+      function fillProvider(labelElement, summaryElement, payload) {
+        if (!payload) {
+          labelElement.textContent = "未知";
+          summaryElement.textContent = "暂无结果。";
+          return;
+        }
+        labelElement.textContent = payload.label || "未知";
+        summaryElement.textContent = payload.summary || "暂无结果。";
+      }
+
+      async function loadVisitorIpCheck() {
+        visitorIpRefresh.disabled = true;
+        visitorIpResult.hidden = true;
+        setVisitorIpStatus("正在检测当前访问 IP...", true);
+
+        try {
+          const response = await fetch("/api/visitor-ip-check", {
+            method: "GET",
+            headers: { Accept: "application/json" },
+            cache: "no-store",
+          });
+          const text = await response.text();
+          let data = {};
+          try {
+            data = text ? JSON.parse(text) : {};
+          } catch {
+            throw new Error(`检测接口没有返回 JSON，HTTP ${response.status}。`);
+          }
+          if (!response.ok) {
+            throw new Error(data.message || `检测失败，HTTP ${response.status}。`);
+          }
+
+          visitorIpElements.ip.textContent = data.ip || "未知";
+          visitorIpElements.location.textContent = formatLocation(data.visitor_network);
+          visitorIpElements.checkedAt.textContent = formatCheckedAt(data.checked_at);
+          fillProvider(visitorIpElements.abuseLabel, visitorIpElements.abuseSummary, data.checks && data.checks.abuse);
+          fillProvider(visitorIpElements.residentialLabel, visitorIpElements.residentialSummary, data.checks && data.checks.residential);
+          fillProvider(visitorIpElements.riskLabel, visitorIpElements.riskSummary, data.checks && data.checks.risk);
+
+          visitorIpResult.hidden = false;
+          setVisitorIpStatus(data.message || "已完成当前访问 IP 检测。", true);
+        } catch (error) {
+          visitorIpResult.hidden = true;
+          setVisitorIpStatus(error.message || "当前访问 IP 检测失败，请稍后重试。", false);
+        } finally {
+          visitorIpRefresh.disabled = false;
+        }
+      }
+
+      visitorIpRefresh.addEventListener("click", loadVisitorIpCheck);
+      loadVisitorIpCheck();
+    </script>
 </body>
 </html>
