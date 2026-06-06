@@ -1456,6 +1456,10 @@ def visitor_ip_card() -> str:
               <strong id="visitor-ip-network-type" class="visitor-ip-summary-value">-</strong>
             </article>
             <article class="visitor-ip-summary-card">
+              <span class="visitor-ip-summary-label">连接协议</span>
+              <strong id="visitor-ip-protocol" class="visitor-ip-summary-value">-</strong>
+            </article>
+            <article class="visitor-ip-summary-card">
               <span class="visitor-ip-summary-label">检测时间</span>
               <strong id="visitor-ip-checked-at" class="visitor-ip-summary-value">-</strong>
             </article>
@@ -1491,6 +1495,63 @@ def visitor_ip_card() -> str:
             <p class="help">把风险等级拆成更具体的命中项，方便判断是否是 VPN、代理或机房线路。</p>
           </div>
           <div id="visitor-ip-risk-tags" class="visitor-ip-tag-list"></div>
+        </section>
+
+        <section class="visitor-ip-block">
+          <div class="visitor-ip-block-header">
+            <h2 class="section-title">浏览器环境</h2>
+            <p class="help">参考 IP 检测站常见信息维度，本区只读取浏览器本地可见信息，不会额外发送到第三方服务。</p>
+          </div>
+          <div class="visitor-ip-provider-grid">
+            <article class="visitor-ip-provider-card">
+              <div class="visitor-ip-provider-head">
+                <h3>浏览器与系统</h3>
+              </div>
+              <dl id="visitor-ip-browser-details" class="visitor-ip-detail-list"></dl>
+            </article>
+            <article class="visitor-ip-provider-card">
+              <div class="visitor-ip-provider-head">
+                <h3>语言与时间</h3>
+              </div>
+              <dl id="visitor-ip-locale-details" class="visitor-ip-detail-list"></dl>
+            </article>
+            <article class="visitor-ip-provider-card">
+              <div class="visitor-ip-provider-head">
+                <h3>屏幕与设备</h3>
+              </div>
+              <dl id="visitor-ip-device-details" class="visitor-ip-detail-list"></dl>
+            </article>
+            <article class="visitor-ip-provider-card">
+              <div class="visitor-ip-provider-head">
+                <h3>隐私与网络能力</h3>
+              </div>
+              <dl id="visitor-ip-capability-details" class="visitor-ip-detail-list"></dl>
+            </article>
+          </div>
+        </section>
+
+        <section class="visitor-ip-block">
+          <div class="visitor-ip-block-header">
+            <h2 class="section-title">WebRTC 暴露检测</h2>
+            <p class="help">检测浏览器本地 ICE 候选地址；默认不配置 STUN 服务器，因此不会为了检测 WebRTC 而连接额外第三方服务。</p>
+          </div>
+          <div class="visitor-ip-provider-grid">
+            <article class="visitor-ip-provider-card">
+              <div class="visitor-ip-provider-head">
+                <h3>检测结果</h3>
+                <span id="visitor-ip-webrtc-status" class="visitor-ip-provider-state">等待检测</span>
+              </div>
+              <p id="visitor-ip-webrtc-summary" class="help visitor-ip-provider-summary">点击开始检测后会读取本地 WebRTC 候选信息。</p>
+              <dl id="visitor-ip-webrtc-details" class="visitor-ip-detail-list"></dl>
+            </article>
+            <article class="visitor-ip-provider-card">
+              <div class="visitor-ip-provider-head">
+                <h3>ICE 候选</h3>
+              </div>
+              <p class="help visitor-ip-provider-summary">现代浏览器通常会用 mDNS 隐藏真实本地地址。</p>
+              <dl id="visitor-ip-webrtc-candidates" class="visitor-ip-detail-list"></dl>
+            </article>
+          </div>
         </section>
 
         <section class="visitor-ip-block">
@@ -1542,6 +1603,14 @@ def visitor_ip_card() -> str:
               <p class="help">不是。它只表示该 IP 曾在公开滥用情报库中出现过记录，仍需结合举报次数、线路类型和当前访问场景综合判断。</p>
             </article>
             <article class="visitor-ip-explainer-card">
+              <h3>WebRTC 检测准确吗？</h3>
+              <p class="help">它只能检测当前浏览器暴露的 ICE 候选。现代浏览器常用 mDNS 隐藏本地 IP，因此“未暴露”不代表没有 WebRTC，也不等同完整 DNS 泄漏检测。</p>
+            </article>
+            <article class="visitor-ip-explainer-card">
+              <h3>浏览器环境检测会上传吗？</h3>
+              <p class="help">不会。User-Agent、语言、时区、屏幕、Cookie、DNT 等信息只在当前页面本地渲染，用来辅助判断访问环境。</p>
+            </article>
+            <article class="visitor-ip-explainer-card">
               <h3>隐私说明</h3>
               <p class="help">只有点击“开始检测”后，当前访问者公网 IP 才会发送到第三方服务查询；页面默认不会自动上报。</p>
             </article>
@@ -1563,6 +1632,7 @@ def visitor_ip_script() -> str:
         isp: document.querySelector("#visitor-ip-isp"),
         asn: document.querySelector("#visitor-ip-asn"),
         networkType: document.querySelector("#visitor-ip-network-type"),
+        protocol: document.querySelector("#visitor-ip-protocol"),
         checkedAt: document.querySelector("#visitor-ip-checked-at"),
         providerSummary: document.querySelector("#visitor-ip-provider-summary"),
         notice: document.querySelector("#visitor-ip-notice"),
@@ -1582,6 +1652,14 @@ def visitor_ip_script() -> str:
         riskStatus: document.querySelector("#visitor-ip-risk-status"),
         riskProviderSummary: document.querySelector("#visitor-ip-risk-provider-summary"),
         riskDetails: document.querySelector("#visitor-ip-risk-details"),
+        browserDetails: document.querySelector("#visitor-ip-browser-details"),
+        localeDetails: document.querySelector("#visitor-ip-locale-details"),
+        deviceDetails: document.querySelector("#visitor-ip-device-details"),
+        capabilityDetails: document.querySelector("#visitor-ip-capability-details"),
+        webrtcStatus: document.querySelector("#visitor-ip-webrtc-status"),
+        webrtcSummary: document.querySelector("#visitor-ip-webrtc-summary"),
+        webrtcDetails: document.querySelector("#visitor-ip-webrtc-details"),
+        webrtcCandidates: document.querySelector("#visitor-ip-webrtc-candidates"),
       };
 
       const riskFlagLabels = {
@@ -1619,6 +1697,20 @@ def visitor_ip_script() -> str:
         }
         const parts = [network.country, network.city, network.colo].filter((part) => part && part !== "未知");
         return parts.length > 0 ? parts.join(" / ") : "未知";
+      }
+
+      function formatIpProtocol(ip) {
+        const value = String(ip || "").trim();
+        if (!value) {
+          return "未知";
+        }
+        if (value.includes(":")) {
+          return "IPv6";
+        }
+        if (/^\d+\.\d+\.\d+\.\d+$/.test(value)) {
+          return "IPv4";
+        }
+        return "未知";
       }
 
       function providerStateLabel(payload) {
@@ -1660,6 +1752,15 @@ def visitor_ip_script() -> str:
         summaryElement.textContent = payload && payload.summary ? payload.summary : "暂无结果。";
       }
 
+      function escapeHtml(value) {
+        return String(value)
+          .replace(/&/g, "&amp;")
+          .replace(/</g, "&lt;")
+          .replace(/>/g, "&gt;")
+          .replace(/"/g, "&quot;")
+          .replace(/'/g, "&#39;");
+      }
+
       function renderDetailList(listElement, rows) {
         const items = rows.filter((row) => row && row.value !== undefined && row.value !== null && String(row.value).trim() !== "");
         if (items.length === 0) {
@@ -1668,8 +1769,8 @@ def visitor_ip_script() -> str:
         }
         listElement.innerHTML = items.map((row) => `
           <div class="visitor-ip-detail-row">
-            <dt>${row.label}</dt>
-            <dd>${row.value}</dd>
+            <dt>${escapeHtml(row.label)}</dt>
+            <dd>${escapeHtml(row.value)}</dd>
           </div>
         `).join("");
       }
@@ -1726,9 +1827,226 @@ def visitor_ip_script() -> str:
         return textOrFallback(checks && checks.residential && checks.residential.asn, "未知");
       }
 
+      function parseBrowserInfo(userAgent) {
+        const ua = String(userAgent || "");
+        const browserRules = [
+          [/Edg\/(\d+)/, "Microsoft Edge"],
+          [/OPR\/(\d+)/, "Opera"],
+          [/Chrome\/(\d+)/, "Chrome"],
+          [/Firefox\/(\d+)/, "Firefox"],
+          [/Version\/(\d+).+Safari\//, "Safari"],
+        ];
+        const osRules = [
+          [/Windows NT 10/, "Windows 10/11"],
+          [/Windows NT/, "Windows"],
+          [/Mac OS X/, "macOS"],
+          [/iPhone|iPad|iPod/, "iOS / iPadOS"],
+          [/Android/, "Android"],
+          [/Linux/, "Linux"],
+        ];
+        const browser = browserRules.find(([pattern]) => pattern.test(ua));
+        const os = osRules.find(([pattern]) => pattern.test(ua));
+        return {
+          browser: browser ? browser[1] : "未知",
+          os: os ? os[1] : "未知",
+        };
+      }
+
+      function formatLanguages(languages) {
+        if (!Array.isArray(languages) || languages.length === 0) {
+          return navigator.language || "未知";
+        }
+        return languages.join(" / ");
+      }
+
+      function formatTimezoneOffset() {
+        const offset = new Date().getTimezoneOffset();
+        const sign = offset <= 0 ? "+" : "-";
+        const absolute = Math.abs(offset);
+        const hours = String(Math.floor(absolute / 60)).padStart(2, "0");
+        const minutes = String(absolute % 60).padStart(2, "0");
+        return `UTC${sign}${hours}:${minutes}`;
+      }
+
+      function formatScreenSize() {
+        if (!window.screen) {
+          return "未知";
+        }
+        return `${screen.width} × ${screen.height}`;
+      }
+
+      function formatViewportSize() {
+        return `${window.innerWidth} × ${window.innerHeight}`;
+      }
+
+      function formatColorDepth() {
+        return window.screen && screen.colorDepth ? `${screen.colorDepth} bit` : "未知";
+      }
+
+      function formatDeviceMemory() {
+        return navigator.deviceMemory ? `${navigator.deviceMemory} GB` : "未知";
+      }
+
+      function formatConnection() {
+        const connection = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
+        if (!connection) {
+          return "未知";
+        }
+        const parts = [connection.effectiveType, connection.type, connection.downlink ? `${connection.downlink} Mbps` : ""].filter(Boolean);
+        return parts.length > 0 ? parts.join(" / ") : "未知";
+      }
+
+      function formatDoNotTrack() {
+        const value = navigator.doNotTrack || window.doNotTrack || navigator.msDoNotTrack;
+        if (value === "1" || value === "yes") {
+          return "已开启";
+        }
+        if (value === "0" || value === "no") {
+          return "未开启";
+        }
+        return "未知";
+      }
+
+      function renderBrowserEnvironment() {
+        const browserInfo = parseBrowserInfo(navigator.userAgent);
+        renderDetailList(visitorIpElements.browserDetails, [
+          { label: "浏览器", value: browserInfo.browser },
+          { label: "操作系统", value: browserInfo.os },
+          { label: "平台", value: navigator.platform || "未知" },
+          { label: "User-Agent", value: navigator.userAgent || "未知" },
+        ]);
+        renderDetailList(visitorIpElements.localeDetails, [
+          { label: "首选语言", value: navigator.language || "未知" },
+          { label: "语言列表", value: formatLanguages(navigator.languages) },
+          { label: "时区", value: Intl.DateTimeFormat().resolvedOptions().timeZone || "未知" },
+          { label: "UTC 偏移", value: formatTimezoneOffset() },
+          { label: "本地时间", value: new Date().toLocaleString("zh-CN", { hour12: false }) },
+        ]);
+        renderDetailList(visitorIpElements.deviceDetails, [
+          { label: "屏幕", value: formatScreenSize() },
+          { label: "视口", value: formatViewportSize() },
+          { label: "像素比", value: window.devicePixelRatio ? String(window.devicePixelRatio) : "未知" },
+          { label: "颜色深度", value: formatColorDepth() },
+          { label: "CPU 线程", value: navigator.hardwareConcurrency ? String(navigator.hardwareConcurrency) : "未知" },
+          { label: "设备内存", value: formatDeviceMemory() },
+        ]);
+        renderDetailList(visitorIpElements.capabilityDetails, [
+          { label: "Cookie", value: navigator.cookieEnabled ? "已启用" : "未启用" },
+          { label: "Do Not Track", value: formatDoNotTrack() },
+          { label: "线上状态", value: navigator.onLine ? "在线" : "离线" },
+          { label: "连接", value: formatConnection() },
+          { label: "HTTPS", value: location.protocol === "https:" ? "是" : "否" },
+          { label: "WebRTC", value: "RTCPeerConnection" in window ? "可用" : "不可用" },
+          { label: "本地存储", value: "localStorage" in window ? "可用" : "不可用" },
+        ]);
+      }
+      async function renderWebRtcExposure() {
+        const PeerConnection = window.RTCPeerConnection || window.webkitRTCPeerConnection || window.mozRTCPeerConnection;
+        if (!PeerConnection) {
+          visitorIpElements.webrtcStatus.textContent = "不可用";
+          visitorIpElements.webrtcStatus.className = "visitor-ip-provider-state not_configured";
+          visitorIpElements.webrtcSummary.textContent = "当前浏览器不支持 RTCPeerConnection，无法读取 WebRTC 候选信息。";
+          renderDetailList(visitorIpElements.webrtcDetails, [
+            { label: "支持状态", value: "不可用" },
+          ]);
+          renderDetailList(visitorIpElements.webrtcCandidates, []);
+          return;
+        }
+
+        visitorIpElements.webrtcStatus.textContent = "检测中";
+        visitorIpElements.webrtcStatus.className = "visitor-ip-provider-state";
+        visitorIpElements.webrtcSummary.textContent = "正在读取本地 WebRTC ICE 候选信息...";
+
+        const candidates = [];
+        let connection;
+        try {
+          connection = new PeerConnection({ iceServers: [] });
+          connection.createDataChannel("visitor-ip-check");
+          connection.onicecandidate = (event) => {
+            if (event.candidate && event.candidate.candidate) {
+              candidates.push(event.candidate.candidate);
+            }
+          };
+          const offer = await connection.createOffer();
+          await connection.setLocalDescription(offer);
+          await new Promise((resolve) => setTimeout(resolve, 1200));
+        } catch (error) {
+          visitorIpElements.webrtcStatus.textContent = "检测失败";
+          visitorIpElements.webrtcStatus.className = "visitor-ip-provider-state error";
+          visitorIpElements.webrtcSummary.textContent = error && error.message ? error.message : "WebRTC 候选信息读取失败。";
+          renderDetailList(visitorIpElements.webrtcDetails, [
+            { label: "支持状态", value: "可用" },
+            { label: "检测结果", value: "失败" },
+          ]);
+          renderDetailList(visitorIpElements.webrtcCandidates, []);
+          return;
+        } finally {
+          if (connection) {
+            connection.onicecandidate = null;
+            connection.close();
+          }
+        }
+
+        const uniqueCandidates = [...new Set(candidates)];
+        const addresses = [...new Set(uniqueCandidates.map(extractWebRtcAddress).filter(Boolean))];
+        const mdnsCount = addresses.filter((address) => address.endsWith(".local")).length;
+        const ipCount = addresses.length - mdnsCount;
+        const exposedPrivate = addresses.filter(isPrivateCandidateAddress).length;
+        const exposedPublic = addresses.filter(isPublicCandidateAddress).length;
+
+        visitorIpElements.webrtcStatus.textContent = uniqueCandidates.length > 0 ? "已完成" : "未发现";
+        visitorIpElements.webrtcStatus.className = "visitor-ip-provider-state ok";
+        visitorIpElements.webrtcSummary.textContent = uniqueCandidates.length > 0
+          ? `发现 ${uniqueCandidates.length} 条 ICE 候选，地址 ${addresses.length} 个。`
+          : "未发现浏览器暴露 WebRTC ICE 候选地址。";
+        renderDetailList(visitorIpElements.webrtcDetails, [
+          { label: "支持状态", value: "可用" },
+          { label: "候选数量", value: `${uniqueCandidates.length} 条` },
+          { label: "地址数量", value: `${addresses.length} 个` },
+          { label: "mDNS 隐藏", value: mdnsCount > 0 ? `${mdnsCount} 个` : "未发现" },
+          { label: "私网地址", value: exposedPrivate > 0 ? `${exposedPrivate} 个` : "未发现" },
+          { label: "公网地址", value: exposedPublic > 0 ? `${exposedPublic} 个` : "未发现" },
+        ]);
+        renderDetailList(visitorIpElements.webrtcCandidates, uniqueCandidates.map((candidate, index) => ({
+          label: `#${index + 1}`,
+          value: candidate,
+        })));
+      }
+
+      function extractWebRtcAddress(candidate) {
+        const parts = String(candidate || "").split(/\s+/);
+        const hostIndex = parts.findIndex((part) => part === "typ");
+        const address = parts[4] || "";
+        if (address && (address.includes(".") || address.includes(":"))) {
+          return address;
+        }
+        const local = parts.find((part) => part.endsWith(".local"));
+        if (local) {
+          return local;
+        }
+        if (hostIndex > 0 && parts[hostIndex - 1]) {
+          return parts[hostIndex - 1];
+        }
+        return "";
+      }
+
+      function isPrivateCandidateAddress(address) {
+        if (!/^\d+\.\d+\.\d+\.\d+$/.test(address)) {
+          return false;
+        }
+        const [a, b] = address.split(".").map(Number);
+        return a === 10 || a === 127 || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168);
+      }
+
+      function isPublicCandidateAddress(address) {
+        if (!/^\d+\.\d+\.\d+\.\d+$/.test(address)) {
+          return false;
+        }
+        return !isPrivateCandidateAddress(address);
+      }
+
       function renderProviderDetails(checks) {
         const abuse = checks && checks.abuse ? checks.abuse : null;
-        const residential = checks && checks.residential ? checks.residential : null;
         const risk = checks && checks.risk ? checks.risk : null;
 
         setProviderMeta(visitorIpElements.abuseStatus, visitorIpElements.abuseProviderSummary, abuse);
@@ -1798,6 +2116,7 @@ def visitor_ip_script() -> str:
           visitorIpElements.isp.textContent = pickPrimaryIsp(data.checks);
           visitorIpElements.asn.textContent = pickPrimaryAsn(data.checks);
           visitorIpElements.networkType.textContent = pickPrimaryNetworkType(data.checks);
+          visitorIpElements.protocol.textContent = formatIpProtocol(data.ip);
           visitorIpElements.checkedAt.textContent = formatCheckedAt(data.checked_at);
           visitorIpElements.providerSummary.textContent = data.provider_summary || "暂无来源摘要。";
           visitorIpElements.notice.textContent = data.notice || "";
@@ -1806,6 +2125,8 @@ def visitor_ip_script() -> str:
           fillProvider(visitorIpElements.residentialLabel, visitorIpElements.residentialSummary, data.checks && data.checks.residential);
           fillProvider(visitorIpElements.riskLabel, visitorIpElements.riskSummary, data.checks && data.checks.risk);
           renderRiskTags(buildRiskTags(data.checks && data.checks.risk));
+          renderBrowserEnvironment();
+          await renderWebRtcExposure();
           renderProviderDetails(data.checks || {});
 
           visitorIpResult.hidden = false;
