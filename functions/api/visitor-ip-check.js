@@ -155,10 +155,24 @@ async function providerFetchJson(url, options, fallbackMessage) {
     const detail = data && typeof data === "object"
       ? data.message || data.error_message || data.reason || data.raw
       : "";
-    throw new Error(detail ? `${fallbackMessage}（HTTP ${response.status}: ${detail}）` : `${fallbackMessage}（HTTP ${response.status}）`);
+    const error = new Error(detail ? `${fallbackMessage}（HTTP ${response.status}: ${detail}）` : `${fallbackMessage}（HTTP ${response.status}）`);
+    error.providerData = data;
+    throw error;
   }
 
   return data;
+}
+
+function attachDebugPayload(result, enabled, raw) {
+  if (!enabled) {
+    return result;
+  }
+  return {
+    ...result,
+    debug: {
+      raw,
+    },
+  };
 }
 
 function boolLabel(value, yesLabel = "是", noLabel = "否") {
@@ -180,6 +194,7 @@ function buildAbuseResult(data) {
   const payload = data && data.data ? data.data : {};
   const score = Number.isFinite(Number(payload.abuseConfidenceScore)) ? Number(payload.abuseConfidenceScore) : null;
   const totalReports = Number.isFinite(Number(payload.totalReports)) ? Number(payload.totalReports) : null;
+  const lastReportedAt = payload.lastReportedAt || "";
   const isAbusive = score === null ? (totalReports && totalReports > 0 ? true : null) : score > 0;
   const label = isAbusive === true ? "有记录" : isAbusive === false ? "未发现" : "未知";
   const summaryParts = [];
@@ -190,8 +205,8 @@ function buildAbuseResult(data) {
   if (totalReports !== null) {
     summaryParts.push(`报告 ${totalReports} 次`);
   }
-  if (payload.lastReportedAt) {
-    summaryParts.push(`最近上报 ${payload.lastReportedAt}`);
+  if (lastReportedAt) {
+    summaryParts.push(`最近上报 ${lastReportedAt}`);
   }
 
   return {
@@ -201,6 +216,7 @@ function buildAbuseResult(data) {
     isAbusive,
     abuseConfidenceScore: score,
     totalReports,
+    lastReportedAt,
     countryCode: payload.countryCode || "",
     usageType: payload.usageType || "",
     isp: payload.isp || "",
@@ -290,29 +306,39 @@ function buildIpdataRiskResult(data) {
     level = "中";
   }
 
+  const threatFlags = {
+    isTor: threat.is_tor ?? null,
+    isProxy: threat.is_proxy ?? null,
+    isAnonymous: threat.is_anonymous ?? null,
+    isKnownAttacker: threat.is_known_attacker ?? null,
+    isKnownAbuser: threat.is_known_abuser ?? null,
+    isDatacenter: threat.is_datacenter ?? null,
+    isIcloudRelay: threat.is_icloud_relay ?? null,
+    isBogon: threat.is_bogon ?? null,
+  };
   const summaryParts = [];
-  if (threat.is_tor === true) {
+  if (threatFlags.isTor === true) {
     summaryParts.push("Tor");
   }
-  if (threat.is_proxy === true) {
+  if (threatFlags.isProxy === true) {
     summaryParts.push("代理");
   }
-  if (threat.is_anonymous === true) {
+  if (threatFlags.isAnonymous === true) {
     summaryParts.push("匿名网络");
   }
-  if (threat.is_known_attacker === true) {
+  if (threatFlags.isKnownAttacker === true) {
     summaryParts.push("已知攻击者");
   }
-  if (threat.is_known_abuser === true) {
+  if (threatFlags.isKnownAbuser === true) {
     summaryParts.push("已知滥用者");
   }
-  if (threat.is_datacenter === true) {
+  if (threatFlags.isDatacenter === true) {
     summaryParts.push("数据中心");
   }
-  if (threat.is_icloud_relay === true) {
+  if (threatFlags.isIcloudRelay === true) {
     summaryParts.push("iCloud Relay");
   }
-  if (threat.is_bogon === true) {
+  if (threatFlags.isBogon === true) {
     summaryParts.push("bogon");
   }
 
@@ -322,16 +348,8 @@ function buildIpdataRiskResult(data) {
     label: level,
     level,
     isThreat: Boolean(hardFlags),
-    threat: {
-      isTor: threat.is_tor ?? null,
-      isProxy: threat.is_proxy ?? null,
-      isAnonymous: threat.is_anonymous ?? null,
-      isKnownAttacker: threat.is_known_attacker ?? null,
-      isKnownAbuser: threat.is_known_abuser ?? null,
-      isDatacenter: threat.is_datacenter ?? null,
-      isIcloudRelay: threat.is_icloud_relay ?? null,
-      isBogon: threat.is_bogon ?? null,
-    },
+    threat: threatFlags,
+    flags: summaryParts,
     summary: summaryParts.length > 0 ? summaryParts.join("，") : "未发现明显风险标记。",
   };
 }
@@ -345,7 +363,7 @@ function providerError(provider, error) {
   };
 }
 
-async function checkAbuseIpdb(ip, env) {
+async function checkAbuseIpdb(ip, env, debugEnabled = false) {
   try {
     const data = await providerFetchJson(
       `https://api.abuseipdb.com/api/v2/check?ipAddress=${encodeURIComponent(ip)}&maxAgeInDays=90&verbose`,
@@ -357,13 +375,13 @@ async function checkAbuseIpdb(ip, env) {
       },
       "AbuseIPDB 查询失败",
     );
-    return buildAbuseResult(data);
+    return attachDebugPayload(buildAbuseResult(data), debugEnabled, data);
   } catch (error) {
-    return providerError("AbuseIPDB", error);
+    return attachDebugPayload(providerError("AbuseIPDB", error), debugEnabled, error && error.providerData ? error.providerData : null);
   }
 }
 
-async function checkIp2Location(ip, env) {
+async function checkIp2Location(ip, env, debugEnabled = false) {
   try {
     const data = await providerFetchJson(
       `https://api.ip2location.io/?key=${encodeURIComponent(env.IP2LOCATION_API_KEY)}&ip=${encodeURIComponent(ip)}&format=json`,
@@ -374,13 +392,13 @@ async function checkIp2Location(ip, env) {
       },
       "IP2Location 查询失败",
     );
-    return buildIp2LocationResult(data);
+    return attachDebugPayload(buildIp2LocationResult(data), debugEnabled, data);
   } catch (error) {
-    return providerError("IP2Location", error);
+    return attachDebugPayload(providerError("IP2Location", error), debugEnabled, error && error.providerData ? error.providerData : null);
   }
 }
 
-async function checkIpdata(ip, env) {
+async function checkIpdata(ip, env, debugEnabled = false) {
   try {
     const data = await providerFetchJson(
       `https://api.ipdata.co/${encodeURIComponent(ip)}?api-key=${encodeURIComponent(env.IPDATA_API_KEY)}`,
@@ -391,9 +409,9 @@ async function checkIpdata(ip, env) {
       },
       "ipdata 查询失败",
     );
-    return buildIpdataRiskResult(data);
+    return attachDebugPayload(buildIpdataRiskResult(data), debugEnabled, data);
   } catch (error) {
-    return providerError("ipdata", error);
+    return attachDebugPayload(providerError("ipdata", error), debugEnabled, error && error.providerData ? error.providerData : null);
   }
 }
 
@@ -431,11 +449,13 @@ export async function onRequest({ request, env }) {
     return new Response(null, { status: 204 });
   }
 
+  let debugEnabled = false;
   if (request.method === "GET") {
     const url = new URL(request.url);
     if (url.searchParams.get("health") === "1") {
       return healthCheckResponse(request, env);
     }
+    debugEnabled = url.searchParams.get("debug") === "1";
   }
 
   if (request.method !== "GET") {
@@ -460,13 +480,13 @@ export async function onRequest({ request, env }) {
   }
 
   const abuse = hasProviderKey(env, "ABUSEIPDB_API_KEY")
-    ? await checkAbuseIpdb(ip, env)
+    ? await checkAbuseIpdb(ip, env, debugEnabled)
     : providerNotConfigured("AbuseIPDB", "ABUSEIPDB_API_KEY");
   const residential = hasProviderKey(env, "IP2LOCATION_API_KEY")
-    ? await checkIp2Location(ip, env)
+    ? await checkIp2Location(ip, env, debugEnabled)
     : providerNotConfigured("IP2Location", "IP2LOCATION_API_KEY");
   const risk = hasProviderKey(env, "IPDATA_API_KEY")
-    ? await checkIpdata(ip, env)
+    ? await checkIpdata(ip, env, debugEnabled)
     : providerNotConfigured("ipdata", "IPDATA_API_KEY");
 
   const checks = { abuse, residential, risk };
@@ -485,5 +505,6 @@ export async function onRequest({ request, env }) {
       : `当前缺少 ${missing.join(", ")}，未配置的检测项将仅显示访问者 IP。`,
     checked_at: new Date().toISOString(),
     visitor_network: normalizeVisitorNetwork(request),
+    debug_enabled: debugEnabled,
   });
 }

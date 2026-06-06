@@ -3,15 +3,16 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>提交文章链接</title>
+  <meta name="description" content="用于维护公开文章归档链接库，支持批量提交公开网页与微信公众号文章链接。">
+  <title>管理员提交文章链接</title>
   <link rel="stylesheet" href="/assets/style.css">
 </head>
 <body>
   <main class="site">
     <section class="panel">
       <header class="site-header">
-        <h1 class="site-title">提交文章链接</h1>
-        <p class="site-desc">请每行粘贴一个公开文章链接。支持通用网页，优先适配微信公众号文章。提交后系统会自动更新链接库，稍后重新生成归档网站。</p>
+        <h1 class="site-title">管理员提交文章链接</h1>
+        <p class="site-desc">用于维护公开文章归档链接库。请输入管理密码后批量提交公开文章链接，系统稍后会自动重新生成归档页面。</p>
       </header>
 
       <form id="submit-form">
@@ -22,83 +23,82 @@
         <textarea id="links" name="links" placeholder="https://example.com/article" required></textarea>
 
         <div class="toolbar">
-          <button id="submit-button" type="submit">提交</button>
-          <a class="button secondary" href="/index.html">返回首页</a>
+          <button id="submit-button" type="submit">提交链接</button>
+          <a class="button secondary" href="/">返回首页</a>
         </div>
         <div id="result" class="result" role="status" aria-live="polite"></div>
       </form>
     </section>
   </main>
+    <script>
+      const form = document.querySelector("#submit-form");
+      const button = document.querySelector("#submit-button");
+      const result = document.querySelector("#result");
 
-  <script>
-    const form = document.querySelector("#submit-form");
-    const button = document.querySelector("#submit-button");
-    const result = document.querySelector("#result");
-
-    function isValidLink(value) {
-      try {
-        const url = new URL(value);
-        return url.protocol === "http:" || url.protocol === "https:";
-      } catch {
-        return false;
-      }
-    }
-
-    function setResult(message, ok) {
-      result.textContent = message;
-      result.className = ok ? "result ok" : "result error";
-    }
-
-    form.addEventListener("submit", async (event) => {
-      event.preventDefault();
-      const password = document.querySelector("#password").value;
-      const rawLinks = document.querySelector("#links").value
-        .split(/\r?\n/)
-        .map((line) => line.trim())
-        .filter(Boolean);
-      const links = [...new Set(rawLinks)];
-      const invalid = links.filter((link) => !isValidLink(link));
-
-      if (!password) {
-        setResult("请输入管理密码。", false);
-        return;
-      }
-      if (links.length === 0) {
-        setResult("请至少输入一个文章链接。", false);
-        return;
-      }
-      if (invalid.length > 0) {
-        setResult("存在无效链接，请检查后重试。", false);
-        return;
-      }
-
-      button.disabled = true;
-      setResult("正在提交...", true);
-
-      try {
-        const response = await fetch("/api/submit", {
-          method: "POST",
-          headers: {"Content-Type": "application/json"},
-          body: JSON.stringify({password, links})
-        });
-        const text = await response.text();
-        let data = {};
+      function isValidLink(value) {
         try {
-          data = text ? JSON.parse(text) : {};
+          const url = new URL(value);
+          return url.protocol === "http:" || url.protocol === "https:";
         } catch {
-          throw new Error(`提交接口没有返回 JSON，HTTP ${response.status}。请检查 Cloudflare Pages Functions 是否已部署。`);
+          return false;
         }
-        if (!response.ok || !data.success) {
-          throw new Error(data.message || `提交失败，HTTP ${response.status}。`);
-        }
-        setResult(`${data.message} 新增 ${data.added} 条，当前共 ${data.total} 条。`, true);
-        document.querySelector("#links").value = "";
-      } catch (error) {
-        setResult(error.message || "提交失败，请稍后重试。", false);
-      } finally {
-        button.disabled = false;
       }
-    });
-  </script>
+
+      function setResult(message, ok) {
+        result.textContent = message;
+        result.className = ok ? "result ok" : "result error";
+      }
+
+      form.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        const password = document.querySelector("#password").value;
+        const rawLinks = document.querySelector("#links").value
+          .split(/\r?\n/)
+          .map((line) => line.trim())
+          .filter(Boolean);
+        const links = [...new Set(rawLinks)];
+        const invalid = links.filter((link) => !isValidLink(link));
+
+        if (!password) {
+          setResult("请输入管理密码。", false);
+          return;
+        }
+        if (links.length === 0) {
+          setResult("请至少输入一个文章链接。", false);
+          return;
+        }
+        if (invalid.length > 0) {
+          setResult("存在无效链接，请检查后重试。", false);
+          return;
+        }
+
+        button.disabled = true;
+        setResult("正在提交...", true);
+
+        try {
+          const response = await fetch("/api/submit", {
+            method: "POST",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({password, links})
+          });
+          const text = await response.text();
+          let data = {};
+          try {
+            data = text ? JSON.parse(text) : {};
+          } catch {
+            throw new Error(`提交接口没有返回 JSON，HTTP ${response.status}。请检查站点后端接口是否已正确部署。`);
+          }
+          if (!response.ok || !data.success) {
+            throw new Error(data.message || `提交失败，HTTP ${response.status}。`);
+          }
+          setResult(`${data.message} 新增 ${data.added} 条，当前共 ${data.total} 条。`, true);
+          document.querySelector("#links").value = "";
+        } catch (error) {
+          setResult(error.message || "提交失败，请稍后重试。", false);
+        } finally {
+          button.disabled = false;
+        }
+      });
+    </script>
 </body>
 </html>

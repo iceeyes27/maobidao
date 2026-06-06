@@ -8,7 +8,7 @@ import html
 import json
 import re
 import time
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urljoin, urlparse
@@ -144,7 +144,7 @@ def parse_publish_time(page: str) -> str:
     if not ct:
         return ""
     try:
-        return datetime.fromtimestamp(int(ct), UTC).strftime("%Y-%m-%d %H:%M:%S")
+        return datetime.fromtimestamp(int(ct), timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
     except (TypeError, ValueError, OSError):
         return ""
 
@@ -593,6 +593,16 @@ a:hover {
   margin-top: 16px;
 }
 
+.toolbar-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.panel-header {
+  margin-bottom: 18px;
+}
+
 .button,
 button {
   display: inline-flex;
@@ -805,11 +815,45 @@ textarea {
   margin-top: 14px;
 }
 
-.visitor-ip-summary {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 10px;
-  margin-bottom: 14px;
+.visitor-ip-block + .visitor-ip-block {
+  margin-top: 22px;
+}
+
+.visitor-ip-block-header {
+  margin-bottom: 12px;
+}
+
+.visitor-ip-block-header .help,
+.visitor-ip-inline-note {
+  margin: 6px 0 0;
+}
+
+.visitor-ip-summary-grid {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+}
+
+.visitor-ip-summary-card {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #f8fafc;
+  padding: 14px 16px;
+}
+
+.visitor-ip-summary-label {
+  display: block;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.visitor-ip-summary-value {
+  display: block;
+  margin-top: 6px;
+  font-size: 18px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
 }
 
 .ip-check-grid {
@@ -839,6 +883,130 @@ textarea {
   color: var(--accent-dark);
 }
 
+.visitor-ip-tag-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.visitor-ip-tag {
+  display: inline-flex;
+  align-items: center;
+  min-height: 32px;
+  padding: 6px 12px;
+  border: 1px solid #cbd5e1;
+  border-radius: 999px;
+  background: #f8fafc;
+  color: var(--text);
+  font-size: 14px;
+  line-height: 1.3;
+}
+
+.visitor-ip-tag.empty {
+  color: var(--muted);
+}
+
+.visitor-ip-provider-grid,
+.visitor-ip-explainer-grid {
+  display: grid;
+  gap: 14px;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+}
+
+.visitor-ip-provider-card,
+.visitor-ip-explainer-card {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #f8fafc;
+  padding: 16px;
+}
+
+.visitor-ip-provider-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.visitor-ip-provider-head h3,
+.visitor-ip-explainer-card h3 {
+  margin: 0;
+  font-size: 16px;
+  line-height: 1.35;
+}
+
+.visitor-ip-provider-state {
+  display: inline-flex;
+  align-items: center;
+  min-height: 28px;
+  padding: 4px 10px;
+  border: 1px solid #cbd5e1;
+  border-radius: 999px;
+  background: #fff;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.visitor-ip-provider-state.ok {
+  border-color: #99f6e4;
+  background: #ecfdf5;
+  color: var(--accent-dark);
+}
+
+.visitor-ip-provider-state.not_configured {
+  border-color: #fde68a;
+  background: #fffbeb;
+  color: #92400e;
+}
+
+.visitor-ip-provider-state.error {
+  border-color: #fecaca;
+  background: #fef2f2;
+  color: var(--danger);
+}
+
+.visitor-ip-provider-summary {
+  margin: 10px 0 0;
+}
+
+.visitor-ip-detail-list {
+  margin: 14px 0 0;
+}
+
+.visitor-ip-detail-row {
+  display: grid;
+  grid-template-columns: 88px minmax(0, 1fr);
+  gap: 10px;
+  padding: 10px 0;
+  border-top: 1px solid #e5e7eb;
+}
+
+.visitor-ip-detail-row:first-of-type {
+  padding-top: 0;
+  border-top: 0;
+}
+
+.visitor-ip-detail-row dt {
+  color: var(--muted);
+}
+
+.visitor-ip-detail-row dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.visitor-ip-detail-empty {
+  margin-top: 14px;
+  color: var(--muted);
+  font-size: 14px;
+}
+
+.visitor-ip-explainer-card .help {
+  margin: 8px 0 0;
+}
+
 .result {
   margin-top: 16px;
   min-height: 28px;
@@ -864,6 +1032,15 @@ textarea {
 
   .site-title {
     font-size: 25px;
+  }
+
+  .visitor-ip-provider-head {
+    align-items: flex-start;
+  }
+
+  .visitor-ip-detail-row {
+    grid-template-columns: 1fr;
+    gap: 4px;
   }
 }
 """
@@ -968,7 +1145,7 @@ def submit_page_script() -> str:
           try {
             data = text ? JSON.parse(text) : {};
           } catch {
-            throw new Error(`提交接口没有返回 JSON，HTTP ${response.status}。请检查 Cloudflare Pages Functions 是否已部署。`);
+            throw new Error(`提交接口没有返回 JSON，HTTP ${response.status}。请检查站点后端接口是否已正确部署。`);
           }
           if (!response.ok || !data.success) {
             throw new Error(data.message || `提交失败，HTTP ${response.status}。`);
@@ -987,7 +1164,7 @@ def submit_page_script() -> str:
     successful_count = sum(1 for article in articles if article.get("success"))
     for article in articles:
         title = html.escape(article.get("title") or "未命名文章")
-        detail_href = f"/articles/{html.escape(article['filename'])}"
+        detail_href = article_detail_path(article)
         original_href = html.escape(article["url"], quote=True)
         error = article.get("error", "")
         meta_html = article_meta(article)
@@ -1019,7 +1196,7 @@ def submit_page_script() -> str:
       <p class="site-desc">手动提交的公开文章链接归档，优先适配微信公众号文章。</p>
       <div class="toolbar">
         <span class="meta">共 {len(articles)} 条链接，成功归档 {successful_count} 篇</span>
-        <a class="button secondary" href="/submit.html">提交新文章链接</a>
+        <a class="button secondary" href="/submit">提交新文章链接</a>
       </div>
     </header>
     <section class="panel">
@@ -1034,12 +1211,14 @@ def write_article_page(article: dict[str, Any]) -> None:
     content_html = article.get("content_html") or ""
     source_card = detail_source_card(article)
     source_card_html = f"      <div class=\"source-card\">\n        {source_card}\n      </div>" if source_card else ""
+    source_title = article.get("account_name") or article.get("source_host") or "公开文章归档"
+    page_title = f"{article.get('title') or '文章详情'} - {source_title} - 公开文章归档"
     if not article.get("success"):
         error = html.escape(article.get("error") or "抓取失败")
         content_html = f'<p class="result error">{error}</p>'
 
     body = f"""    <article class="article">
-      <p><a href="/index.html">返回首页</a></p>
+      <p><a href="/">返回首页</a></p>
       <h1 class="site-title">{title}</h1>
       <div class="meta">
         {article_meta(article)}
@@ -1050,25 +1229,22 @@ def write_article_page(article: dict[str, Any]) -> None:
       </div>
       <p class="links"><a href="{original_href}" target="_blank" rel="noopener noreferrer">查看原文链接</a></p>
     </article>"""
-    (ARTICLES_DIR / article["filename"]).write_text(page_shell(article.get("title") or "文章详情", body), encoding="utf-8")
+    (ARTICLES_DIR / article["filename"]).write_text(
+        page_shell(
+            page_title,
+            body,
+            description=f"{article.get('title') or '文章详情'} 的归档页，保留原文来源与抓取信息。",
+        ),
+        encoding="utf-8",
+    )
 
 
 
 def write_submit_page() -> None:
-    html_text = """<!doctype html>
-<html lang="zh-CN">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>提交文章链接</title>
-  <link rel="stylesheet" href="/assets/style.css">
-</head>
-<body>
-  <main class="site">
-    <section class="panel">
+    body = """    <section class="panel">
       <header class="site-header">
-        <h1 class="site-title">提交文章链接</h1>
-        <p class="site-desc">请每行粘贴一个公开文章链接。支持通用网页，优先适配微信公众号文章。提交后系统会自动更新链接库，稍后重新生成归档网站。</p>
+        <h1 class="site-title">管理员提交文章链接</h1>
+        <p class="site-desc">用于维护公开文章归档链接库。请输入管理密码后批量提交公开文章链接，系统稍后会自动重新生成归档页面。</p>
       </header>
 
       <form id="submit-form">
@@ -1079,87 +1255,90 @@ def write_submit_page() -> None:
         <textarea id="links" name="links" placeholder="https://example.com/article" required></textarea>
 
         <div class="toolbar">
-          <button id="submit-button" type="submit">提交</button>
-          <a class="button secondary" href="/index.html">返回首页</a>
+          <button id="submit-button" type="submit">提交链接</button>
+          <a class="button secondary" href="/">返回首页</a>
         </div>
         <div id="result" class="result" role="status" aria-live="polite"></div>
       </form>
-    </section>
-  </main>
+    </section>"""
 
-  <script>
-    const form = document.querySelector("#submit-form");
-    const button = document.querySelector("#submit-button");
-    const result = document.querySelector("#result");
+    script = """    <script>
+      const form = document.querySelector(\"#submit-form\");
+      const button = document.querySelector(\"#submit-button\");
+      const result = document.querySelector(\"#result\");
 
-    function isValidLink(value) {
-      try {
-        const url = new URL(value);
-        return url.protocol === "http:" || url.protocol === "https:";
-      } catch {
-        return false;
-      }
-    }
-
-    function setResult(message, ok) {
-      result.textContent = message;
-      result.className = ok ? "result ok" : "result error";
-    }
-
-    form.addEventListener("submit", async (event) => {
-      event.preventDefault();
-      const password = document.querySelector("#password").value;
-      const rawLinks = document.querySelector("#links").value
-        .split(/\\r?\\n/)
-        .map((line) => line.trim())
-        .filter(Boolean);
-      const links = [...new Set(rawLinks)];
-      const invalid = links.filter((link) => !isValidLink(link));
-
-      if (!password) {
-        setResult("请输入管理密码。", false);
-        return;
-      }
-      if (links.length === 0) {
-        setResult("请至少输入一个文章链接。", false);
-        return;
-      }
-      if (invalid.length > 0) {
-        setResult("存在无效链接，请检查后重试。", false);
-        return;
-      }
-
-      button.disabled = true;
-      setResult("正在提交...", true);
-
-      try {
-        const response = await fetch("/api/submit", {
-          method: "POST",
-          headers: {"Content-Type": "application/json"},
-          body: JSON.stringify({password, links})
-        });
-        const text = await response.text();
-        let data = {};
+      function isValidLink(value) {
         try {
-          data = text ? JSON.parse(text) : {};
+          const url = new URL(value);
+          return url.protocol === \"http:\" || url.protocol === \"https:\";
         } catch {
-          throw new Error(`提交接口没有返回 JSON，HTTP ${response.status}。请检查 Cloudflare Pages Functions 是否已部署。`);
+          return false;
         }
-        if (!response.ok || !data.success) {
-          throw new Error(data.message || `提交失败，HTTP ${response.status}。`);
-        }
-        setResult(`${data.message} 新增 ${data.added} 条，当前共 ${data.total} 条。`, true);
-        document.querySelector("#links").value = "";
-      } catch (error) {
-        setResult(error.message || "提交失败，请稍后重试。", false);
-      } finally {
-        button.disabled = false;
       }
-    });
-  </script>
-</body>
-</html>
-"""
+
+      function setResult(message, ok) {
+        result.textContent = message;
+        result.className = ok ? \"result ok\" : \"result error\";
+      }
+
+      form.addEventListener(\"submit\", async (event) => {
+        event.preventDefault();
+        const password = document.querySelector(\"#password\").value;
+        const rawLinks = document.querySelector(\"#links\").value
+          .split(/\\r?\\n/)
+          .map((line) => line.trim())
+          .filter(Boolean);
+        const links = [...new Set(rawLinks)];
+        const invalid = links.filter((link) => !isValidLink(link));
+
+        if (!password) {
+          setResult(\"请输入管理密码。\", false);
+          return;
+        }
+        if (links.length === 0) {
+          setResult(\"请至少输入一个文章链接。\", false);
+          return;
+        }
+        if (invalid.length > 0) {
+          setResult(\"存在无效链接，请检查后重试。\", false);
+          return;
+        }
+
+        button.disabled = true;
+        setResult(\"正在提交...\", true);
+
+        try {
+          const response = await fetch(\"/api/submit\", {
+            method: \"POST\",
+            headers: {\"Content-Type\": \"application/json\"},
+            body: JSON.stringify({password, links})
+          });
+          const text = await response.text();
+          let data = {};
+          try {
+            data = text ? JSON.parse(text) : {};
+          } catch {
+            throw new Error(`提交接口没有返回 JSON，HTTP ${response.status}。请检查站点后端接口是否已正确部署。`);
+          }
+          if (!response.ok || !data.success) {
+            throw new Error(data.message || `提交失败，HTTP ${response.status}。`);
+          }
+          setResult(`${data.message} 新增 ${data.added} 条，当前共 ${data.total} 条。`, true);
+          document.querySelector(\"#links\").value = \"\";
+        } catch (error) {
+          setResult(error.message || \"提交失败，请稍后重试。\", false);
+        } finally {
+          button.disabled = false;
+        }
+      });
+    </script>"""
+
+    html_text = page_shell(
+        "管理员提交文章链接",
+        body,
+        script,
+        description="用于维护公开文章归档链接库，支持批量提交公开网页与微信公众号文章链接。",
+    )
     (PUBLIC / "submit.html").write_text(html_text, encoding="utf-8")
 
 
@@ -1170,12 +1349,17 @@ def write_articles_json(articles: list[dict[str, Any]]) -> None:
     )
 
 
-def page_shell(title: str, body: str, extra_scripts: str = "") -> str:
+def page_shell(title: str, body: str, extra_scripts: str = "", description: str = "") -> str:
+    meta_description = (
+        f'\n  <meta name="description" content="{html.escape(description, quote=True)}">'
+        if description
+        else ""
+    )
     return f"""<!doctype html>
 <html lang=\"zh-CN\">
 <head>
   <meta charset=\"utf-8\">
-  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">
+  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">{meta_description}
   <title>{html.escape(title)}</title>
   <link rel=\"stylesheet\" href=\"/assets/style.css\">
 </head>
@@ -1187,6 +1371,13 @@ def page_shell(title: str, body: str, extra_scripts: str = "") -> str:
 </body>
 </html>
 """
+
+
+def article_detail_path(article: dict[str, Any]) -> str:
+    filename = article.get("filename") or ""
+    article_slug = Path(filename).stem if filename else article.get("id") or ""
+    return f"/articles/{html.escape(article_slug)}"
+
 
 
 def article_meta(article: dict[str, Any]) -> str:
@@ -1206,9 +1397,11 @@ def article_meta(article: dict[str, Any]) -> str:
     return "\n        ".join(items)
 
 
+
 def list_source_label(article: dict[str, Any]) -> str:
     source_name = clean_text(article.get("source_name") or article.get("source_host") or "来源站点")
     return html.escape(source_name)
+
 
 
 def detail_source_card(article: dict[str, Any]) -> str:
@@ -1223,101 +1416,371 @@ def detail_source_card(article: dict[str, Any]) -> str:
     return "\n        ".join(rows)
 
 
+
 def visitor_ip_card() -> str:
-    return """    <section class=\"panel visitor-ip-panel\">
-      <div class=\"visitor-ip-header\">
+    return """    <section class="panel visitor-ip-panel">
+      <header class="panel-header">
+        <h1 class="site-title">访问 IP 检测</h1>
+        <p class="site-desc">手动检测当前访问者公网 IP，并汇总 AbuseIPDB、IP2Location、ipdata 返回的风险与线路信息。</p>
+      </header>
+      <div class="visitor-ip-header">
         <div>
-          <h2 class=\"section-title\">当前访问 IP 检测</h2>
-          <p class=\"help\">打开页面后会自动检测当前访问者公网 IP，并发送到 AbuseIPDB、IP2Location、ipdata 查询安全信息。</p>
+          <h2 class="section-title">开始检测</h2>
+          <p class="help">仅在点击后才会调用第三方检测服务，页面不会自动检测。</p>
         </div>
-        <button id=\"visitor-ip-refresh\" type=\"button\" class=\"button secondary\">重新检测</button>
+        <button id="visitor-ip-refresh" type="button" class="button">开始检测</button>
       </div>
-      <div id=\"visitor-ip-status\" class=\"result\" role=\"status\" aria-live=\"polite\">正在检测当前访问 IP...</div>
-      <div id=\"visitor-ip-result\" class=\"visitor-ip-result\" hidden>
-        <div class=\"visitor-ip-summary\">
-          <span class=\"meta-item\"><span class=\"meta-key\">当前 IP</span><span id=\"visitor-ip-value\" class=\"meta-value\">-</span></span>
-          <span class=\"meta-item\"><span class=\"meta-key\">位置</span><span id=\"visitor-ip-location\" class=\"meta-value\">-</span></span>
-          <span class=\"meta-item\"><span class=\"meta-key\">检测时间</span><span id=\"visitor-ip-checked-at\" class=\"meta-value\">-</span></span>
-        </div>
-        <div class=\"ip-check-grid\">
-          <article class=\"ip-check-card\">
-            <h3>是否滥用</h3>
-            <p id=\"visitor-ip-abuse-label\" class=\"ip-check-value\">-</p>
-            <p id=\"visitor-ip-abuse-summary\" class=\"help\">-</p>
-          </article>
-          <article class=\"ip-check-card\">
-            <h3>是否家宽</h3>
-            <p id=\"visitor-ip-residential-label\" class=\"ip-check-value\">-</p>
-            <p id=\"visitor-ip-residential-summary\" class=\"help\">-</p>
-          </article>
-          <article class=\"ip-check-card\">
-            <h3>IP 风险</h3>
-            <p id=\"visitor-ip-risk-label\" class=\"ip-check-value\">-</p>
-            <p id=\"visitor-ip-risk-summary\" class=\"help\">-</p>
-          </article>
-        </div>
+      <div id="visitor-ip-status" class="result" role="status" aria-live="polite">点击上方按钮后开始检测。</div>
+      <div id="visitor-ip-result" class="visitor-ip-result" hidden>
+        <section class="visitor-ip-block">
+          <h2 class="section-title">检测摘要</h2>
+          <div class="visitor-ip-summary-grid">
+            <article class="visitor-ip-summary-card">
+              <span class="visitor-ip-summary-label">当前 IP</span>
+              <strong id="visitor-ip-value" class="visitor-ip-summary-value">-</strong>
+            </article>
+            <article class="visitor-ip-summary-card">
+              <span class="visitor-ip-summary-label">位置</span>
+              <strong id="visitor-ip-location" class="visitor-ip-summary-value">-</strong>
+            </article>
+            <article class="visitor-ip-summary-card">
+              <span class="visitor-ip-summary-label">运营商</span>
+              <strong id="visitor-ip-isp" class="visitor-ip-summary-value">-</strong>
+            </article>
+            <article class="visitor-ip-summary-card">
+              <span class="visitor-ip-summary-label">ASN</span>
+              <strong id="visitor-ip-asn" class="visitor-ip-summary-value">-</strong>
+            </article>
+            <article class="visitor-ip-summary-card">
+              <span class="visitor-ip-summary-label">网络类型</span>
+              <strong id="visitor-ip-network-type" class="visitor-ip-summary-value">-</strong>
+            </article>
+            <article class="visitor-ip-summary-card">
+              <span class="visitor-ip-summary-label">检测时间</span>
+              <strong id="visitor-ip-checked-at" class="visitor-ip-summary-value">-</strong>
+            </article>
+          </div>
+          <p id="visitor-ip-provider-summary" class="help visitor-ip-inline-note">-</p>
+          <p id="visitor-ip-notice" class="help visitor-ip-inline-note">-</p>
+        </section>
+
+        <section class="visitor-ip-block">
+          <h2 class="section-title">核心结论</h2>
+          <div class="ip-check-grid">
+            <article class="ip-check-card">
+              <h3>是否滥用</h3>
+              <p id="visitor-ip-abuse-label" class="ip-check-value">-</p>
+              <p id="visitor-ip-abuse-summary" class="help">-</p>
+            </article>
+            <article class="ip-check-card">
+              <h3>是否家宽</h3>
+              <p id="visitor-ip-residential-label" class="ip-check-value">-</p>
+              <p id="visitor-ip-residential-summary" class="help">-</p>
+            </article>
+            <article class="ip-check-card">
+              <h3>IP 风险</h3>
+              <p id="visitor-ip-risk-label" class="ip-check-value">-</p>
+              <p id="visitor-ip-risk-summary" class="help">-</p>
+            </article>
+          </div>
+        </section>
+
+        <section class="visitor-ip-block">
+          <div class="visitor-ip-block-header">
+            <h2 class="section-title">风险标签</h2>
+            <p class="help">把风险等级拆成更具体的命中项，方便判断是否是 VPN、代理或机房线路。</p>
+          </div>
+          <div id="visitor-ip-risk-tags" class="visitor-ip-tag-list"></div>
+        </section>
+
+        <section class="visitor-ip-block">
+          <div class="visitor-ip-block-header">
+            <h2 class="section-title">检测明细</h2>
+            <p class="help">保留每个来源的状态、摘要和关键字段，便于核对结论来自哪里。</p>
+          </div>
+          <div class="visitor-ip-provider-grid">
+            <article class="visitor-ip-provider-card">
+              <div class="visitor-ip-provider-head">
+                <h3>AbuseIPDB</h3>
+                <span id="visitor-ip-abuse-status" class="visitor-ip-provider-state">-</span>
+              </div>
+              <p id="visitor-ip-abuse-provider-summary" class="help visitor-ip-provider-summary">-</p>
+              <dl id="visitor-ip-abuse-details" class="visitor-ip-detail-list"></dl>
+            </article>
+            <article class="visitor-ip-provider-card">
+              <div class="visitor-ip-provider-head">
+                <h3>IP2Location</h3>
+                <span id="visitor-ip-residential-status" class="visitor-ip-provider-state">-</span>
+              </div>
+              <p id="visitor-ip-residential-provider-summary" class="help visitor-ip-provider-summary">-</p>
+              <dl id="visitor-ip-residential-details" class="visitor-ip-detail-list"></dl>
+            </article>
+            <article class="visitor-ip-provider-card">
+              <div class="visitor-ip-provider-head">
+                <h3>ipdata</h3>
+                <span id="visitor-ip-risk-status" class="visitor-ip-provider-state">-</span>
+              </div>
+              <p id="visitor-ip-risk-provider-summary" class="help visitor-ip-provider-summary">-</p>
+              <dl id="visitor-ip-risk-details" class="visitor-ip-detail-list"></dl>
+            </article>
+          </div>
+        </section>
+
+        <section class="visitor-ip-block visitor-ip-explainer">
+          <h2 class="section-title">说明</h2>
+          <div class="visitor-ip-explainer-grid">
+            <article class="visitor-ip-explainer-card">
+              <h3>是否家宽是什么意思？</h3>
+              <p class="help">“是”表示更像普通家庭宽带或移动运营商网络；“否”通常更接近数据中心、云服务或企业专线。</p>
+            </article>
+            <article class="visitor-ip-explainer-card">
+              <h3>风险高 / 中 / 低怎么理解？</h3>
+              <p class="help">高风险通常意味着命中 Tor、代理、匿名网络或已知滥用标记；中风险多为数据中心、iCloud Relay 等软标记；低风险表示未发现明显风险标签。</p>
+            </article>
+            <article class="visitor-ip-explainer-card">
+              <h3>“有记录”是不是等于恶意？</h3>
+              <p class="help">不是。它只表示该 IP 曾在公开滥用情报库中出现过记录，仍需结合举报次数、线路类型和当前访问场景综合判断。</p>
+            </article>
+            <article class="visitor-ip-explainer-card">
+              <h3>隐私说明</h3>
+              <p class="help">只有点击“开始检测”后，当前访问者公网 IP 才会发送到第三方服务查询；页面默认不会自动上报。</p>
+            </article>
+          </div>
+        </section>
       </div>
     </section>"""
 
 
+
 def visitor_ip_script() -> str:
     return """    <script>
-      const visitorIpStatus = document.querySelector(\"#visitor-ip-status\");
-      const visitorIpResult = document.querySelector(\"#visitor-ip-result\");
-      const visitorIpRefresh = document.querySelector(\"#visitor-ip-refresh\");
+      const visitorIpStatus = document.querySelector("#visitor-ip-status");
+      const visitorIpResult = document.querySelector("#visitor-ip-result");
+      const visitorIpRefresh = document.querySelector("#visitor-ip-refresh");
       const visitorIpElements = {
-        ip: document.querySelector(\"#visitor-ip-value\"),
-        location: document.querySelector(\"#visitor-ip-location\"),
-        checkedAt: document.querySelector(\"#visitor-ip-checked-at\"),
-        abuseLabel: document.querySelector(\"#visitor-ip-abuse-label\"),
-        abuseSummary: document.querySelector(\"#visitor-ip-abuse-summary\"),
-        residentialLabel: document.querySelector(\"#visitor-ip-residential-label\"),
-        residentialSummary: document.querySelector(\"#visitor-ip-residential-summary\"),
-        riskLabel: document.querySelector(\"#visitor-ip-risk-label\"),
-        riskSummary: document.querySelector(\"#visitor-ip-risk-summary\"),
+        ip: document.querySelector("#visitor-ip-value"),
+        location: document.querySelector("#visitor-ip-location"),
+        isp: document.querySelector("#visitor-ip-isp"),
+        asn: document.querySelector("#visitor-ip-asn"),
+        networkType: document.querySelector("#visitor-ip-network-type"),
+        checkedAt: document.querySelector("#visitor-ip-checked-at"),
+        providerSummary: document.querySelector("#visitor-ip-provider-summary"),
+        notice: document.querySelector("#visitor-ip-notice"),
+        riskTags: document.querySelector("#visitor-ip-risk-tags"),
+        abuseLabel: document.querySelector("#visitor-ip-abuse-label"),
+        abuseSummary: document.querySelector("#visitor-ip-abuse-summary"),
+        residentialLabel: document.querySelector("#visitor-ip-residential-label"),
+        residentialSummary: document.querySelector("#visitor-ip-residential-summary"),
+        riskLabel: document.querySelector("#visitor-ip-risk-label"),
+        riskSummary: document.querySelector("#visitor-ip-risk-summary"),
+        abuseStatus: document.querySelector("#visitor-ip-abuse-status"),
+        abuseProviderSummary: document.querySelector("#visitor-ip-abuse-provider-summary"),
+        abuseDetails: document.querySelector("#visitor-ip-abuse-details"),
+        residentialStatus: document.querySelector("#visitor-ip-residential-status"),
+        residentialProviderSummary: document.querySelector("#visitor-ip-residential-provider-summary"),
+        residentialDetails: document.querySelector("#visitor-ip-residential-details"),
+        riskStatus: document.querySelector("#visitor-ip-risk-status"),
+        riskProviderSummary: document.querySelector("#visitor-ip-risk-provider-summary"),
+        riskDetails: document.querySelector("#visitor-ip-risk-details"),
+      };
+
+      const riskFlagLabels = {
+        isTor: "Tor",
+        isProxy: "代理",
+        isAnonymous: "匿名网络",
+        isKnownAttacker: "已知攻击者",
+        isKnownAbuser: "已知滥用者",
+        isDatacenter: "数据中心",
+        isIcloudRelay: "iCloud Relay",
+        isBogon: "bogon",
       };
 
       function setVisitorIpStatus(message, ok) {
         visitorIpStatus.textContent = message;
-        visitorIpStatus.className = ok ? \"result ok\" : \"result error\";
+        visitorIpStatus.className = ok ? "result ok" : "result error";
+      }
+
+      function textOrFallback(value, fallback = "未知") {
+        const text = String(value || "").trim();
+        return text || fallback;
       }
 
       function formatCheckedAt(value) {
         if (!value) {
-          return \"未知\";
+          return "未知";
         }
         const date = new Date(value);
-        return Number.isNaN(date.getTime()) ? value : date.toLocaleString(\"zh-CN\", { hour12: false });
+        return Number.isNaN(date.getTime()) ? value : date.toLocaleString("zh-CN", { hour12: false });
       }
 
       function formatLocation(network) {
         if (!network) {
-          return \"未知\";
+          return "未知";
         }
-        const parts = [network.country, network.city, network.colo].filter((part) => part && part !== \"未知\");
-        return parts.length > 0 ? parts.join(\" / \") : \"未知\";
+        const parts = [network.country, network.city, network.colo].filter((part) => part && part !== "未知");
+        return parts.length > 0 ? parts.join(" / ") : "未知";
+      }
+
+      function providerStateLabel(payload) {
+        if (!payload || !payload.status) {
+          return "未知";
+        }
+        if (payload.status === "ok") {
+          return "已完成";
+        }
+        if (payload.status === "not_configured") {
+          return "未配置";
+        }
+        if (payload.status === "error") {
+          return "查询失败";
+        }
+        return payload.status;
+      }
+
+      function providerStateClass(payload) {
+        if (!payload || !payload.status) {
+          return "visitor-ip-provider-state";
+        }
+        return `visitor-ip-provider-state ${payload.status}`;
       }
 
       function fillProvider(labelElement, summaryElement, payload) {
         if (!payload) {
-          labelElement.textContent = \"未知\";
-          summaryElement.textContent = \"暂无结果。\";
+          labelElement.textContent = "未知";
+          summaryElement.textContent = "暂无结果。";
           return;
         }
-        labelElement.textContent = payload.label || \"未知\";
-        summaryElement.textContent = payload.summary || \"暂无结果。\";
+        labelElement.textContent = payload.label || "未知";
+        summaryElement.textContent = payload.summary || "暂无结果。";
+      }
+
+      function setProviderMeta(statusElement, summaryElement, payload) {
+        statusElement.textContent = providerStateLabel(payload);
+        statusElement.className = providerStateClass(payload);
+        summaryElement.textContent = payload && payload.summary ? payload.summary : "暂无结果。";
+      }
+
+      function renderDetailList(listElement, rows) {
+        const items = rows.filter((row) => row && row.value !== undefined && row.value !== null && String(row.value).trim() !== "");
+        if (items.length === 0) {
+          listElement.innerHTML = '<div class="visitor-ip-detail-empty">暂无更多字段。</div>';
+          return;
+        }
+        listElement.innerHTML = items.map((row) => `
+          <div class="visitor-ip-detail-row">
+            <dt>${row.label}</dt>
+            <dd>${row.value}</dd>
+          </div>
+        `).join("");
+      }
+
+      function boolText(value) {
+        if (value === true) {
+          return "是";
+        }
+        if (value === false) {
+          return "否";
+        }
+        return "未知";
+      }
+
+      function buildRiskTags(riskPayload) {
+        if (!riskPayload || riskPayload.status !== "ok") {
+          return [];
+        }
+        if (Array.isArray(riskPayload.flags) && riskPayload.flags.length > 0) {
+          return riskPayload.flags;
+        }
+        const threat = riskPayload.threat && typeof riskPayload.threat === "object" ? riskPayload.threat : {};
+        return Object.entries(riskFlagLabels)
+          .filter(([key]) => threat[key] === true)
+          .map(([, label]) => label);
+      }
+
+      function renderRiskTags(tags) {
+        if (!Array.isArray(tags) || tags.length === 0) {
+          visitorIpElements.riskTags.innerHTML = '<span class="visitor-ip-tag empty">未发现明显风险标记</span>';
+          return;
+        }
+        visitorIpElements.riskTags.innerHTML = tags.map((tag) => `<span class="visitor-ip-tag">${tag}</span>`).join("");
+      }
+
+      function pickPrimaryNetworkType(checks) {
+        const residential = checks && checks.residential ? checks.residential : null;
+        if (!residential) {
+          return "未知";
+        }
+        const candidates = [residential.usageType, residential.category, residential.connectionType].filter(Boolean);
+        return candidates.length > 0 ? candidates.join(" / ") : (residential.label || "未知");
+      }
+
+      function pickPrimaryIsp(checks) {
+        const candidates = [
+          checks && checks.residential && checks.residential.isp,
+          checks && checks.abuse && checks.abuse.isp,
+        ].filter(Boolean);
+        return candidates[0] || "未知";
+      }
+
+      function pickPrimaryAsn(checks) {
+        return textOrFallback(checks && checks.residential && checks.residential.asn, "未知");
+      }
+
+      function renderProviderDetails(checks) {
+        const abuse = checks && checks.abuse ? checks.abuse : null;
+        const residential = checks && checks.residential ? checks.residential : null;
+        const risk = checks && checks.risk ? checks.risk : null;
+
+        setProviderMeta(visitorIpElements.abuseStatus, visitorIpElements.abuseProviderSummary, abuse);
+        renderDetailList(visitorIpElements.abuseDetails, [
+          { label: "状态", value: providerStateLabel(abuse) },
+          { label: "结论", value: abuse && abuse.label },
+          { label: "置信分", value: abuse && abuse.abuseConfidenceScore !== null && abuse.abuseConfidenceScore !== undefined ? String(abuse.abuseConfidenceScore) : "" },
+          { label: "举报次数", value: abuse && abuse.totalReports !== null && abuse.totalReports !== undefined ? `${abuse.totalReports} 次` : "" },
+          { label: "最近上报", value: abuse && abuse.lastReportedAt },
+          { label: "线路类型", value: abuse && abuse.usageType },
+          { label: "运营商", value: abuse && abuse.isp },
+          { label: "国家代码", value: abuse && abuse.countryCode },
+        ]);
+
+        setProviderMeta(visitorIpElements.residentialStatus, visitorIpElements.residentialProviderSummary, residential);
+        renderDetailList(visitorIpElements.residentialDetails, [
+          { label: "状态", value: providerStateLabel(residential) },
+          { label: "结论", value: residential && residential.label },
+          { label: "用途类型", value: residential && residential.usageType },
+          { label: "分类", value: residential && residential.category },
+          { label: "连接类型", value: residential && residential.connectionType },
+          { label: "运营商", value: residential && residential.isp },
+          { label: "ASN", value: residential && residential.asn },
+          { label: "国家", value: residential && residential.countryName },
+        ]);
+
+        setProviderMeta(visitorIpElements.riskStatus, visitorIpElements.riskProviderSummary, risk);
+        renderDetailList(visitorIpElements.riskDetails, [
+          { label: "状态", value: providerStateLabel(risk) },
+          { label: "风险等级", value: risk && risk.level },
+          { label: "是否高风险", value: risk ? boolText(risk.isThreat) : "" },
+          { label: "Tor", value: risk && risk.threat ? boolText(risk.threat.isTor) : "" },
+          { label: "代理", value: risk && risk.threat ? boolText(risk.threat.isProxy) : "" },
+          { label: "匿名网络", value: risk && risk.threat ? boolText(risk.threat.isAnonymous) : "" },
+          { label: "已知攻击者", value: risk && risk.threat ? boolText(risk.threat.isKnownAttacker) : "" },
+          { label: "已知滥用者", value: risk && risk.threat ? boolText(risk.threat.isKnownAbuser) : "" },
+          { label: "数据中心", value: risk && risk.threat ? boolText(risk.threat.isDatacenter) : "" },
+          { label: "iCloud Relay", value: risk && risk.threat ? boolText(risk.threat.isIcloudRelay) : "" },
+          { label: "bogon", value: risk && risk.threat ? boolText(risk.threat.isBogon) : "" },
+        ]);
       }
 
       async function loadVisitorIpCheck() {
         visitorIpRefresh.disabled = true;
         visitorIpResult.hidden = true;
-        setVisitorIpStatus(\"正在检测当前访问 IP...\", true);
+        setVisitorIpStatus("正在检测当前访问 IP...", true);
 
         try {
-          const response = await fetch(\"/api/visitor-ip-check\", {
-            method: \"GET\",
-            headers: { Accept: \"application/json\" },
-            cache: \"no-store\",
+          const response = await fetch("/api/visitor-ip-check", {
+            method: "GET",
+            headers: { Accept: "application/json" },
+            cache: "no-store",
           });
           const text = await response.text();
           let data = {};
@@ -1330,39 +1793,60 @@ def visitor_ip_script() -> str:
             throw new Error(data.message || `检测失败，HTTP ${response.status}。`);
           }
 
-          visitorIpElements.ip.textContent = data.ip || \"未知\";
+          visitorIpElements.ip.textContent = data.ip || "未知";
           visitorIpElements.location.textContent = formatLocation(data.visitor_network);
+          visitorIpElements.isp.textContent = pickPrimaryIsp(data.checks);
+          visitorIpElements.asn.textContent = pickPrimaryAsn(data.checks);
+          visitorIpElements.networkType.textContent = pickPrimaryNetworkType(data.checks);
           visitorIpElements.checkedAt.textContent = formatCheckedAt(data.checked_at);
+          visitorIpElements.providerSummary.textContent = data.provider_summary || "暂无来源摘要。";
+          visitorIpElements.notice.textContent = data.notice || "";
+
           fillProvider(visitorIpElements.abuseLabel, visitorIpElements.abuseSummary, data.checks && data.checks.abuse);
           fillProvider(visitorIpElements.residentialLabel, visitorIpElements.residentialSummary, data.checks && data.checks.residential);
           fillProvider(visitorIpElements.riskLabel, visitorIpElements.riskSummary, data.checks && data.checks.risk);
+          renderRiskTags(buildRiskTags(data.checks && data.checks.risk));
+          renderProviderDetails(data.checks || {});
 
           visitorIpResult.hidden = false;
-          setVisitorIpStatus(data.message || \"已完成当前访问 IP 检测。\", true);
+          setVisitorIpStatus(data.message || "已完成当前访问 IP 检测。", true);
         } catch (error) {
           visitorIpResult.hidden = true;
-          setVisitorIpStatus(error.message || \"当前访问 IP 检测失败，请稍后重试。\", false);
+          setVisitorIpStatus(error.message || "当前访问 IP 检测失败，请稍后重试。", false);
         } finally {
           visitorIpRefresh.disabled = false;
         }
       }
 
-      visitorIpRefresh.addEventListener(\"click\", loadVisitorIpCheck);
-      loadVisitorIpCheck();
+      visitorIpRefresh.addEventListener("click", loadVisitorIpCheck);
     </script>"""
 
 
+
+def write_visitor_ip_page() -> None:
+    body = f"""    <div class="toolbar">
+      <a class="button secondary" href="/">返回首页</a>
+    </div>
+{visitor_ip_card()}"""
+    html_text = page_shell(
+        "我的 IP 是什么？访问 IP 风险 / 家宽 / 代理检测",
+        body,
+        visitor_ip_script(),
+        description="手动检测当前访问者公网 IP，查看位置、运营商、ASN、家宽判断，以及代理、Tor、数据中心等风险标记。",
+    )
+    (PUBLIC / "visitor-ip.html").write_text(html_text, encoding="utf-8")
+
+
 def write_index(articles: list[dict[str, Any]]) -> None:
+    successful_articles = [article for article in articles if article.get("success")]
+    failed_count = len(articles) - len(successful_articles)
     items = []
-    successful_count = sum(1 for article in articles if article.get("success"))
-    for article in articles:
+    for article in successful_articles:
         title = html.escape(article.get("title") or "未命名文章")
-        detail_href = f"/articles/{html.escape(article['filename'])}"
+        detail_href = article_detail_path(article)
         original_href = html.escape(article["url"], quote=True)
-        error = article.get("error", "")
         meta_html = article_meta(article)
         meta_block = f'<div class="article-meta">\n          {meta_html}\n        </div>' if meta_html else ""
-        error_html = f'<p class="error-note">错误：{html.escape(error)}</p>' if error else ""
         source_label = list_source_label(article)
         items.append(
             f"""      <li class="article-item">
@@ -1371,7 +1855,6 @@ def write_index(articles: list[dict[str, Any]]) -> None:
           <span class="source-badge">{source_label}</span>
         </div>
         {meta_block}
-        {error_html}
         <div class="links">
           <a href="{detail_href}">查看归档页</a>
           <a href="{original_href}" target="_blank" rel="noopener noreferrer">查看原文</a>
@@ -1382,21 +1865,41 @@ def write_index(articles: list[dict[str, Any]]) -> None:
     if items:
         list_html = '<ul class="article-list">\n' + "\n".join(items) + "\n    </ul>"
     else:
-        list_html = '<p class="empty">暂无文章。请通过提交页添加公开文章链接。</p>'
+        list_html = '<p class="empty">暂无成功归档的文章。请通过管理员提交页添加公开文章链接。</p>'
+
+    failure_note = (
+        f'<p class="help">另有 {failed_count} 条链接暂未归档成功，已从公开列表中隐藏。</p>'
+        if failed_count > 0
+        else ""
+    )
 
     body = f"""    <header class="site-header">
-      <h1 class="site-title">文章归档</h1>
-      <p class="site-desc">手动提交的公开文章链接归档，优先适配微信公众号文章。</p>
+      <h1 class="site-title">公开文章归档</h1>
+      <p class="site-desc">手动收录公开文章链接，优先适配微信公众号文章，提供更稳定的归档阅读页与原文入口。</p>
       <div class="toolbar">
-        <span class="meta">共 {len(articles)} 条链接，成功归档 {successful_count} 篇</span>
-        <a class="button secondary" href="/submit.html">提交新文章链接</a>
+        <span class="meta">共 {len(articles)} 条链接，成功归档 {len(successful_articles)} 篇</span>
+        <div class="toolbar-actions">
+          <a class="button secondary" href="/visitor-ip">访问 IP 检测工具</a>
+          <a class="button secondary" href="/submit">管理员入口</a>
+        </div>
       </div>
+      {failure_note}
     </header>
-{visitor_ip_card()}
     <section class="panel">
+      <header class="panel-header">
+        <h2 class="section-title">最新归档</h2>
+        <p class="help">首页仅展示成功归档的文章，原文链接会继续保留在详情页中。</p>
+      </header>
 {list_html}
     </section>"""
-    (PUBLIC / "index.html").write_text(page_shell("文章归档", body, visitor_ip_script()), encoding="utf-8")
+    (PUBLIC / "index.html").write_text(
+        page_shell(
+            "公开文章归档",
+            body,
+            description="手动收录公开文章链接，优先适配微信公众号文章，提供稳定的归档阅读页与原文入口。",
+        ),
+        encoding="utf-8",
+    )
 
 
 def build() -> None:
@@ -1404,6 +1907,7 @@ def build() -> None:
     ensure_dirs()
     write_style()
     write_submit_page()
+    write_visitor_ip_page()
 
     urls = load_urls()
     articles = []

@@ -1,0 +1,415 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="手动检测当前访问者公网 IP，查看位置、运营商、ASN、家宽判断，以及代理、Tor、数据中心等风险标记。">
+  <title>我的 IP 是什么？访问 IP 风险 / 家宽 / 代理检测</title>
+  <link rel="stylesheet" href="/assets/style.css">
+</head>
+<body>
+  <main class="site">
+    <div class="toolbar">
+      <a class="button secondary" href="/">返回首页</a>
+    </div>
+    <section class="panel visitor-ip-panel">
+      <header class="panel-header">
+        <h1 class="site-title">访问 IP 检测</h1>
+        <p class="site-desc">手动检测当前访问者公网 IP，并汇总 AbuseIPDB、IP2Location、ipdata 返回的风险与线路信息。</p>
+      </header>
+      <div class="visitor-ip-header">
+        <div>
+          <h2 class="section-title">开始检测</h2>
+          <p class="help">仅在点击后才会调用第三方检测服务，页面不会自动检测。</p>
+        </div>
+        <button id="visitor-ip-refresh" type="button" class="button">开始检测</button>
+      </div>
+      <div id="visitor-ip-status" class="result" role="status" aria-live="polite">点击上方按钮后开始检测。</div>
+      <div id="visitor-ip-result" class="visitor-ip-result" hidden>
+        <section class="visitor-ip-block">
+          <h2 class="section-title">检测摘要</h2>
+          <div class="visitor-ip-summary-grid">
+            <article class="visitor-ip-summary-card">
+              <span class="visitor-ip-summary-label">当前 IP</span>
+              <strong id="visitor-ip-value" class="visitor-ip-summary-value">-</strong>
+            </article>
+            <article class="visitor-ip-summary-card">
+              <span class="visitor-ip-summary-label">位置</span>
+              <strong id="visitor-ip-location" class="visitor-ip-summary-value">-</strong>
+            </article>
+            <article class="visitor-ip-summary-card">
+              <span class="visitor-ip-summary-label">运营商</span>
+              <strong id="visitor-ip-isp" class="visitor-ip-summary-value">-</strong>
+            </article>
+            <article class="visitor-ip-summary-card">
+              <span class="visitor-ip-summary-label">ASN</span>
+              <strong id="visitor-ip-asn" class="visitor-ip-summary-value">-</strong>
+            </article>
+            <article class="visitor-ip-summary-card">
+              <span class="visitor-ip-summary-label">网络类型</span>
+              <strong id="visitor-ip-network-type" class="visitor-ip-summary-value">-</strong>
+            </article>
+            <article class="visitor-ip-summary-card">
+              <span class="visitor-ip-summary-label">检测时间</span>
+              <strong id="visitor-ip-checked-at" class="visitor-ip-summary-value">-</strong>
+            </article>
+          </div>
+          <p id="visitor-ip-provider-summary" class="help visitor-ip-inline-note">-</p>
+          <p id="visitor-ip-notice" class="help visitor-ip-inline-note">-</p>
+        </section>
+
+        <section class="visitor-ip-block">
+          <h2 class="section-title">核心结论</h2>
+          <div class="ip-check-grid">
+            <article class="ip-check-card">
+              <h3>是否滥用</h3>
+              <p id="visitor-ip-abuse-label" class="ip-check-value">-</p>
+              <p id="visitor-ip-abuse-summary" class="help">-</p>
+            </article>
+            <article class="ip-check-card">
+              <h3>是否家宽</h3>
+              <p id="visitor-ip-residential-label" class="ip-check-value">-</p>
+              <p id="visitor-ip-residential-summary" class="help">-</p>
+            </article>
+            <article class="ip-check-card">
+              <h3>IP 风险</h3>
+              <p id="visitor-ip-risk-label" class="ip-check-value">-</p>
+              <p id="visitor-ip-risk-summary" class="help">-</p>
+            </article>
+          </div>
+        </section>
+
+        <section class="visitor-ip-block">
+          <div class="visitor-ip-block-header">
+            <h2 class="section-title">风险标签</h2>
+            <p class="help">把风险等级拆成更具体的命中项，方便判断是否是 VPN、代理或机房线路。</p>
+          </div>
+          <div id="visitor-ip-risk-tags" class="visitor-ip-tag-list"></div>
+        </section>
+
+        <section class="visitor-ip-block">
+          <div class="visitor-ip-block-header">
+            <h2 class="section-title">检测明细</h2>
+            <p class="help">保留每个来源的状态、摘要和关键字段，便于核对结论来自哪里。</p>
+          </div>
+          <div class="visitor-ip-provider-grid">
+            <article class="visitor-ip-provider-card">
+              <div class="visitor-ip-provider-head">
+                <h3>AbuseIPDB</h3>
+                <span id="visitor-ip-abuse-status" class="visitor-ip-provider-state">-</span>
+              </div>
+              <p id="visitor-ip-abuse-provider-summary" class="help visitor-ip-provider-summary">-</p>
+              <dl id="visitor-ip-abuse-details" class="visitor-ip-detail-list"></dl>
+            </article>
+            <article class="visitor-ip-provider-card">
+              <div class="visitor-ip-provider-head">
+                <h3>IP2Location</h3>
+                <span id="visitor-ip-residential-status" class="visitor-ip-provider-state">-</span>
+              </div>
+              <p id="visitor-ip-residential-provider-summary" class="help visitor-ip-provider-summary">-</p>
+              <dl id="visitor-ip-residential-details" class="visitor-ip-detail-list"></dl>
+            </article>
+            <article class="visitor-ip-provider-card">
+              <div class="visitor-ip-provider-head">
+                <h3>ipdata</h3>
+                <span id="visitor-ip-risk-status" class="visitor-ip-provider-state">-</span>
+              </div>
+              <p id="visitor-ip-risk-provider-summary" class="help visitor-ip-provider-summary">-</p>
+              <dl id="visitor-ip-risk-details" class="visitor-ip-detail-list"></dl>
+            </article>
+          </div>
+        </section>
+
+        <section class="visitor-ip-block visitor-ip-explainer">
+          <h2 class="section-title">说明</h2>
+          <div class="visitor-ip-explainer-grid">
+            <article class="visitor-ip-explainer-card">
+              <h3>是否家宽是什么意思？</h3>
+              <p class="help">“是”表示更像普通家庭宽带或移动运营商网络；“否”通常更接近数据中心、云服务或企业专线。</p>
+            </article>
+            <article class="visitor-ip-explainer-card">
+              <h3>风险高 / 中 / 低怎么理解？</h3>
+              <p class="help">高风险通常意味着命中 Tor、代理、匿名网络或已知滥用标记；中风险多为数据中心、iCloud Relay 等软标记；低风险表示未发现明显风险标签。</p>
+            </article>
+            <article class="visitor-ip-explainer-card">
+              <h3>“有记录”是不是等于恶意？</h3>
+              <p class="help">不是。它只表示该 IP 曾在公开滥用情报库中出现过记录，仍需结合举报次数、线路类型和当前访问场景综合判断。</p>
+            </article>
+            <article class="visitor-ip-explainer-card">
+              <h3>隐私说明</h3>
+              <p class="help">只有点击“开始检测”后，当前访问者公网 IP 才会发送到第三方服务查询；页面默认不会自动上报。</p>
+            </article>
+          </div>
+        </section>
+      </div>
+    </section>
+  </main>
+    <script>
+      const visitorIpStatus = document.querySelector("#visitor-ip-status");
+      const visitorIpResult = document.querySelector("#visitor-ip-result");
+      const visitorIpRefresh = document.querySelector("#visitor-ip-refresh");
+      const visitorIpElements = {
+        ip: document.querySelector("#visitor-ip-value"),
+        location: document.querySelector("#visitor-ip-location"),
+        isp: document.querySelector("#visitor-ip-isp"),
+        asn: document.querySelector("#visitor-ip-asn"),
+        networkType: document.querySelector("#visitor-ip-network-type"),
+        checkedAt: document.querySelector("#visitor-ip-checked-at"),
+        providerSummary: document.querySelector("#visitor-ip-provider-summary"),
+        notice: document.querySelector("#visitor-ip-notice"),
+        riskTags: document.querySelector("#visitor-ip-risk-tags"),
+        abuseLabel: document.querySelector("#visitor-ip-abuse-label"),
+        abuseSummary: document.querySelector("#visitor-ip-abuse-summary"),
+        residentialLabel: document.querySelector("#visitor-ip-residential-label"),
+        residentialSummary: document.querySelector("#visitor-ip-residential-summary"),
+        riskLabel: document.querySelector("#visitor-ip-risk-label"),
+        riskSummary: document.querySelector("#visitor-ip-risk-summary"),
+        abuseStatus: document.querySelector("#visitor-ip-abuse-status"),
+        abuseProviderSummary: document.querySelector("#visitor-ip-abuse-provider-summary"),
+        abuseDetails: document.querySelector("#visitor-ip-abuse-details"),
+        residentialStatus: document.querySelector("#visitor-ip-residential-status"),
+        residentialProviderSummary: document.querySelector("#visitor-ip-residential-provider-summary"),
+        residentialDetails: document.querySelector("#visitor-ip-residential-details"),
+        riskStatus: document.querySelector("#visitor-ip-risk-status"),
+        riskProviderSummary: document.querySelector("#visitor-ip-risk-provider-summary"),
+        riskDetails: document.querySelector("#visitor-ip-risk-details"),
+      };
+
+      const riskFlagLabels = {
+        isTor: "Tor",
+        isProxy: "代理",
+        isAnonymous: "匿名网络",
+        isKnownAttacker: "已知攻击者",
+        isKnownAbuser: "已知滥用者",
+        isDatacenter: "数据中心",
+        isIcloudRelay: "iCloud Relay",
+        isBogon: "bogon",
+      };
+
+      function setVisitorIpStatus(message, ok) {
+        visitorIpStatus.textContent = message;
+        visitorIpStatus.className = ok ? "result ok" : "result error";
+      }
+
+      function textOrFallback(value, fallback = "未知") {
+        const text = String(value || "").trim();
+        return text || fallback;
+      }
+
+      function formatCheckedAt(value) {
+        if (!value) {
+          return "未知";
+        }
+        const date = new Date(value);
+        return Number.isNaN(date.getTime()) ? value : date.toLocaleString("zh-CN", { hour12: false });
+      }
+
+      function formatLocation(network) {
+        if (!network) {
+          return "未知";
+        }
+        const parts = [network.country, network.city, network.colo].filter((part) => part && part !== "未知");
+        return parts.length > 0 ? parts.join(" / ") : "未知";
+      }
+
+      function providerStateLabel(payload) {
+        if (!payload || !payload.status) {
+          return "未知";
+        }
+        if (payload.status === "ok") {
+          return "已完成";
+        }
+        if (payload.status === "not_configured") {
+          return "未配置";
+        }
+        if (payload.status === "error") {
+          return "查询失败";
+        }
+        return payload.status;
+      }
+
+      function providerStateClass(payload) {
+        if (!payload || !payload.status) {
+          return "visitor-ip-provider-state";
+        }
+        return `visitor-ip-provider-state ${payload.status}`;
+      }
+
+      function fillProvider(labelElement, summaryElement, payload) {
+        if (!payload) {
+          labelElement.textContent = "未知";
+          summaryElement.textContent = "暂无结果。";
+          return;
+        }
+        labelElement.textContent = payload.label || "未知";
+        summaryElement.textContent = payload.summary || "暂无结果。";
+      }
+
+      function setProviderMeta(statusElement, summaryElement, payload) {
+        statusElement.textContent = providerStateLabel(payload);
+        statusElement.className = providerStateClass(payload);
+        summaryElement.textContent = payload && payload.summary ? payload.summary : "暂无结果。";
+      }
+
+      function renderDetailList(listElement, rows) {
+        const items = rows.filter((row) => row && row.value !== undefined && row.value !== null && String(row.value).trim() !== "");
+        if (items.length === 0) {
+          listElement.innerHTML = '<div class="visitor-ip-detail-empty">暂无更多字段。</div>';
+          return;
+        }
+        listElement.innerHTML = items.map((row) => `
+          <div class="visitor-ip-detail-row">
+            <dt>${row.label}</dt>
+            <dd>${row.value}</dd>
+          </div>
+        `).join("");
+      }
+
+      function boolText(value) {
+        if (value === true) {
+          return "是";
+        }
+        if (value === false) {
+          return "否";
+        }
+        return "未知";
+      }
+
+      function buildRiskTags(riskPayload) {
+        if (!riskPayload || riskPayload.status !== "ok") {
+          return [];
+        }
+        if (Array.isArray(riskPayload.flags) && riskPayload.flags.length > 0) {
+          return riskPayload.flags;
+        }
+        const threat = riskPayload.threat && typeof riskPayload.threat === "object" ? riskPayload.threat : {};
+        return Object.entries(riskFlagLabels)
+          .filter(([key]) => threat[key] === true)
+          .map(([, label]) => label);
+      }
+
+      function renderRiskTags(tags) {
+        if (!Array.isArray(tags) || tags.length === 0) {
+          visitorIpElements.riskTags.innerHTML = '<span class="visitor-ip-tag empty">未发现明显风险标记</span>';
+          return;
+        }
+        visitorIpElements.riskTags.innerHTML = tags.map((tag) => `<span class="visitor-ip-tag">${tag}</span>`).join("");
+      }
+
+      function pickPrimaryNetworkType(checks) {
+        const residential = checks && checks.residential ? checks.residential : null;
+        if (!residential) {
+          return "未知";
+        }
+        const candidates = [residential.usageType, residential.category, residential.connectionType].filter(Boolean);
+        return candidates.length > 0 ? candidates.join(" / ") : (residential.label || "未知");
+      }
+
+      function pickPrimaryIsp(checks) {
+        const candidates = [
+          checks && checks.residential && checks.residential.isp,
+          checks && checks.abuse && checks.abuse.isp,
+        ].filter(Boolean);
+        return candidates[0] || "未知";
+      }
+
+      function pickPrimaryAsn(checks) {
+        return textOrFallback(checks && checks.residential && checks.residential.asn, "未知");
+      }
+
+      function renderProviderDetails(checks) {
+        const abuse = checks && checks.abuse ? checks.abuse : null;
+        const residential = checks && checks.residential ? checks.residential : null;
+        const risk = checks && checks.risk ? checks.risk : null;
+
+        setProviderMeta(visitorIpElements.abuseStatus, visitorIpElements.abuseProviderSummary, abuse);
+        renderDetailList(visitorIpElements.abuseDetails, [
+          { label: "状态", value: providerStateLabel(abuse) },
+          { label: "结论", value: abuse && abuse.label },
+          { label: "置信分", value: abuse && abuse.abuseConfidenceScore !== null && abuse.abuseConfidenceScore !== undefined ? String(abuse.abuseConfidenceScore) : "" },
+          { label: "举报次数", value: abuse && abuse.totalReports !== null && abuse.totalReports !== undefined ? `${abuse.totalReports} 次` : "" },
+          { label: "最近上报", value: abuse && abuse.lastReportedAt },
+          { label: "线路类型", value: abuse && abuse.usageType },
+          { label: "运营商", value: abuse && abuse.isp },
+          { label: "国家代码", value: abuse && abuse.countryCode },
+        ]);
+
+        setProviderMeta(visitorIpElements.residentialStatus, visitorIpElements.residentialProviderSummary, residential);
+        renderDetailList(visitorIpElements.residentialDetails, [
+          { label: "状态", value: providerStateLabel(residential) },
+          { label: "结论", value: residential && residential.label },
+          { label: "用途类型", value: residential && residential.usageType },
+          { label: "分类", value: residential && residential.category },
+          { label: "连接类型", value: residential && residential.connectionType },
+          { label: "运营商", value: residential && residential.isp },
+          { label: "ASN", value: residential && residential.asn },
+          { label: "国家", value: residential && residential.countryName },
+        ]);
+
+        setProviderMeta(visitorIpElements.riskStatus, visitorIpElements.riskProviderSummary, risk);
+        renderDetailList(visitorIpElements.riskDetails, [
+          { label: "状态", value: providerStateLabel(risk) },
+          { label: "风险等级", value: risk && risk.level },
+          { label: "是否高风险", value: risk ? boolText(risk.isThreat) : "" },
+          { label: "Tor", value: risk && risk.threat ? boolText(risk.threat.isTor) : "" },
+          { label: "代理", value: risk && risk.threat ? boolText(risk.threat.isProxy) : "" },
+          { label: "匿名网络", value: risk && risk.threat ? boolText(risk.threat.isAnonymous) : "" },
+          { label: "已知攻击者", value: risk && risk.threat ? boolText(risk.threat.isKnownAttacker) : "" },
+          { label: "已知滥用者", value: risk && risk.threat ? boolText(risk.threat.isKnownAbuser) : "" },
+          { label: "数据中心", value: risk && risk.threat ? boolText(risk.threat.isDatacenter) : "" },
+          { label: "iCloud Relay", value: risk && risk.threat ? boolText(risk.threat.isIcloudRelay) : "" },
+          { label: "bogon", value: risk && risk.threat ? boolText(risk.threat.isBogon) : "" },
+        ]);
+      }
+
+      async function loadVisitorIpCheck() {
+        visitorIpRefresh.disabled = true;
+        visitorIpResult.hidden = true;
+        setVisitorIpStatus("正在检测当前访问 IP...", true);
+
+        try {
+          const response = await fetch("/api/visitor-ip-check", {
+            method: "GET",
+            headers: { Accept: "application/json" },
+            cache: "no-store",
+          });
+          const text = await response.text();
+          let data = {};
+          try {
+            data = text ? JSON.parse(text) : {};
+          } catch {
+            throw new Error(`检测接口没有返回 JSON，HTTP ${response.status}。`);
+          }
+          if (!response.ok) {
+            throw new Error(data.message || `检测失败，HTTP ${response.status}。`);
+          }
+
+          visitorIpElements.ip.textContent = data.ip || "未知";
+          visitorIpElements.location.textContent = formatLocation(data.visitor_network);
+          visitorIpElements.isp.textContent = pickPrimaryIsp(data.checks);
+          visitorIpElements.asn.textContent = pickPrimaryAsn(data.checks);
+          visitorIpElements.networkType.textContent = pickPrimaryNetworkType(data.checks);
+          visitorIpElements.checkedAt.textContent = formatCheckedAt(data.checked_at);
+          visitorIpElements.providerSummary.textContent = data.provider_summary || "暂无来源摘要。";
+          visitorIpElements.notice.textContent = data.notice || "";
+
+          fillProvider(visitorIpElements.abuseLabel, visitorIpElements.abuseSummary, data.checks && data.checks.abuse);
+          fillProvider(visitorIpElements.residentialLabel, visitorIpElements.residentialSummary, data.checks && data.checks.residential);
+          fillProvider(visitorIpElements.riskLabel, visitorIpElements.riskSummary, data.checks && data.checks.risk);
+          renderRiskTags(buildRiskTags(data.checks && data.checks.risk));
+          renderProviderDetails(data.checks || {});
+
+          visitorIpResult.hidden = false;
+          setVisitorIpStatus(data.message || "已完成当前访问 IP 检测。", true);
+        } catch (error) {
+          visitorIpResult.hidden = true;
+          setVisitorIpStatus(error.message || "当前访问 IP 检测失败，请稍后重试。", false);
+        } finally {
+          visitorIpRefresh.disabled = false;
+        }
+      }
+
+      visitorIpRefresh.addEventListener("click", loadVisitorIpCheck);
+    </script>
+</body>
+</html>
