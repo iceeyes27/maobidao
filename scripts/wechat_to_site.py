@@ -6,7 +6,9 @@ from __future__ import annotations
 import hashlib
 import html
 import json
+import os
 import re
+import shutil
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -25,9 +27,11 @@ ARTICLES_DIR = PUBLIC / "articles"
 ASSETS_DIR = PUBLIC / "assets"
 IMAGES_DIR = ASSETS_DIR / "images"
 PUBLIC_DATA_DIR = PUBLIC / "data"
-ARTICLES_JSON = PUBLIC_DATA_DIR / "articles.json"
+PUBLIC_ARTICLES_JSON = PUBLIC_DATA_DIR / "articles.json"
+ARTICLES_CACHE_JSON = ROOT / "data" / "articles-cache.json"
 
 WECHAT_PREFIX = "https://mp.weixin.qq.com/"
+REFETCH_ALL = os.environ.get("REFETCH_ALL", "").strip().lower() in {"1", "true", "yes"}
 USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -111,8 +115,10 @@ def load_urls() -> list[str]:
 
 
 def load_cached_articles() -> dict[str, dict[str, Any]]:
-    data = read_json_file(ARTICLES_JSON, {"articles": []})
-    articles = data.get("articles", [])
+    data = read_json_file(ARTICLES_CACHE_JSON, None)
+    if data is None:
+        data = read_json_file(PUBLIC_ARTICLES_JSON, {"articles": []})
+    articles = data.get("articles", []) if isinstance(data, dict) else []
     cached: dict[str, dict[str, Any]] = {}
 
     if not isinstance(articles, list):
@@ -200,6 +206,51 @@ def image_extension_from_type(content_type: str) -> str:
     }.get(content_type, "jpg")
 
 
+def positive_int(value: Any) -> int | None:
+    text = str(value or "")
+    match = re.search(r"\d+", text)
+    if not match:
+        return None
+    number = int(match.group(0))
+    return number if number > 0 else None
+
+
+def positive_float(value: Any) -> float | None:
+    try:
+        number = float(str(value or "").strip())
+    except ValueError:
+        return None
+    return number if number > 0 else None
+
+
+def apply_image_attributes(image: Any) -> bool:
+    changed = False
+
+    if not image.has_attr("alt"):
+        image["alt"] = ""
+        changed = True
+
+    if not image.get("loading"):
+        image["loading"] = "lazy"
+        changed = True
+
+    width = positive_int(image.get("width"))
+    if width is None:
+        width = positive_int(image.get("data-w"))
+        if width is not None:
+            image["width"] = str(width)
+            changed = True
+
+    if positive_int(image.get("height")) is None and width is not None:
+        ratio = positive_float(image.get("data-ratio"))
+        if ratio is not None:
+            height = max(1, round(width * ratio))
+            image["height"] = str(height)
+            changed = True
+
+    return changed
+
+
 def download_image(source_url: str, article_url: str, image_dir: Path) -> str:
     digest = hashlib.md5(source_url.encode("utf-8")).hexdigest()
     existing = next(image_dir.glob(f"{digest}.*"), None)
@@ -251,6 +302,8 @@ def localize_article_images(article: dict[str, Any]) -> dict[str, Any]:
 
     changed = False
     for image in root.select("img"):
+        if apply_image_attributes(image):
+            changed = True
         source = image.get("src") or image.get("data-src") or image.get("data-original") or image.get("data-lazy-src")
         if not source or source.startswith("/assets/images/"):
             continue
@@ -285,7 +338,7 @@ def clean_node(node: Any, base_url: str) -> None:
         source = image.get("src") or image.get("data-src") or image.get("data-original") or image.get("data-lazy-src")
         if source:
             image["src"] = urljoin(base_url, source)
-        image["loading"] = image.get("loading") or "lazy"
+        apply_image_attributes(image)
     for link in node.select("a[href]"):
         link["href"] = urljoin(base_url, link.get("href", ""))
     remove_empty_blocks(node)
@@ -512,6 +565,7 @@ def ensure_dirs() -> None:
     ASSETS_DIR.mkdir(parents=True, exist_ok=True)
     IMAGES_DIR.mkdir(parents=True, exist_ok=True)
     PUBLIC_DATA_DIR.mkdir(parents=True, exist_ok=True)
+    remove_public_articles_json()
     for old_article in ARTICLES_DIR.glob("*.html"):
         old_article.unlink()
 
@@ -1080,146 +1134,6 @@ def build_summary_stats(articles: list[dict[str, Any]]) -> str:
     ])
 
 
-def submit_page_script() -> str:
-    return """    <script>
-      const form = document.querySelector(\"#submit-form\");
-      const button = document.querySelector(\"#submit-button\");
-      const result = document.querySelector(\"#result\");
-      const linksInput = document.querySelector(\"#links\");
-      const summary = document.querySelector(\"#link-summary\");
-
-      function isValidLink(value) {
-        try {
-          const url = new URL(value);
-          return url.protocol === \"http:\" || url.protocol === \"https:\";
-        } catch {
-          return false;
-        }
-      }
-
-      function setResult(message, ok) {
-        result.textContent = message;
-        result.className = ok ? \"result ok\" : \"result error\";
-      }
-
-      function parseLinks() {
-        const rawLinks = linksInput.value
-          .split(/\\r?\\n/)
-          .map((line) => line.trim())
-          .filter(Boolean);
-        const links = [...new Set(rawLinks)];
-        const invalid = links.filter((link) => !isValidLink(link));
-        return { links, invalid };
-      }
-
-      function updateSummary() {
-        const { links, invalid } = parseLinks();
-        const validCount = links.length - invalid.length;
-        if (links.length === 0) {
-          summary.textContent = \"每行一条链接，提交前会自动去重。\";
-          return;
-        }
-        if (invalid.length > 0) {
-          summary.textContent = `已识别 ${links.length} 条，包含 ${invalid.length} 条无效链接。`;
-          return;
-        }
-        summary.textContent = `已识别 ${links.length} 条有效链接，提交时会自动去重。`;
-      }
-
-      linksInput.addEventListener(\"input\", updateSummary);
-      updateSummary();
-
-      form.addEventListener(\"submit\", async (event) => {
-        event.preventDefault();
-        const password = document.querySelector(\"#password\").value;
-        const { links, invalid } = parseLinks();
-
-        if (!password) {
-          setResult(\"请输入管理密码。\", false);
-          return;
-        }
-        if (links.length === 0) {
-          setResult(\"请至少输入一个文章链接。\", false);
-          return;
-        }
-        if (invalid.length > 0) {
-          setResult(\"存在无效链接，请检查后重试。\", false);
-          return;
-        }
-
-        button.disabled = true;
-        setResult(\"正在提交...\", true);
-
-        try {
-          const response = await fetch(\"/api/submit\", {
-            method: \"POST\",
-            headers: {\"Content-Type\": \"application/json\"},
-            body: JSON.stringify({password, links})
-          });
-          const text = await response.text();
-          let data = {};
-          try {
-            data = text ? JSON.parse(text) : {};
-          } catch {
-            throw new Error(`提交接口没有返回 JSON，HTTP ${response.status}。请检查站点后端接口是否已正确部署。`);
-          }
-          if (!response.ok || !data.success) {
-            throw new Error(data.message || `提交失败，HTTP ${response.status}。`);
-          }
-          setResult(`${data.message} 新增 ${data.added} 条，当前共 ${data.total} 条。`, true);
-          linksInput.value = \"\";
-          updateSummary();
-        } catch (error) {
-          setResult(error.message || \"提交失败，请稍后重试。\", false);
-        } finally {
-          button.disabled = false;
-        }
-      });
-    </script>"""
-    items = []
-    successful_count = sum(1 for article in articles if article.get("success"))
-    for article in articles:
-        title = html.escape(article.get("title") or "未命名文章")
-        detail_href = article_detail_path(article)
-        original_href = html.escape(article["url"], quote=True)
-        error = article.get("error", "")
-        meta_html = article_meta(article)
-        meta_block = f'<div class="article-meta">\n          {meta_html}\n        </div>' if meta_html else ""
-        error_html = f'<p class="error-note">错误：{html.escape(error)}</p>' if error else ""
-        source_label = list_source_label(article)
-        items.append(
-            f"""      <li class="article-item">
-        <div class="article-title-row">
-          <h2><a href="{detail_href}">{title}</a></h2>
-          <span class="source-badge">{source_label}</span>
-        </div>
-        {meta_block}
-        {error_html}
-        <div class="links">
-          <a href="{detail_href}">查看归档页</a>
-          <a href="{original_href}" target="_blank" rel="noopener noreferrer">查看原文</a>
-        </div>
-      </li>"""
-        )
-
-    if items:
-        list_html = '<ul class="article-list">\n' + "\n".join(items) + "\n    </ul>"
-    else:
-        list_html = '<p class="empty">暂无文章。请通过提交页添加公开文章链接。</p>'
-
-    body = f"""    <header class="site-header">
-      <h1 class="site-title">文章归档</h1>
-      <p class="site-desc">手动提交的公开文章链接归档，优先适配微信公众号文章。</p>
-      <div class="toolbar">
-        <span class="meta">共 {len(articles)} 条链接，成功归档 {successful_count} 篇</span>
-        <a class="button secondary" href="/submit">提交新文章链接</a>
-      </div>
-    </header>
-    <section class="panel">
-{list_html}
-    </section>"""
-    (PUBLIC / "index.html").write_text(page_shell("文章归档", body), encoding="utf-8")
-
 
 def write_article_page(article: dict[str, Any]) -> None:
     title = html.escape(article.get("title") or "未命名文章")
@@ -1358,8 +1272,14 @@ def write_submit_page() -> None:
     (PUBLIC / "submit.html").write_text(html_text, encoding="utf-8")
 
 
-def write_articles_json(articles: list[dict[str, Any]]) -> None:
-    ARTICLES_JSON.write_text(
+def remove_public_articles_json() -> None:
+    if PUBLIC_ARTICLES_JSON.exists():
+        PUBLIC_ARTICLES_JSON.unlink()
+
+
+def write_articles_cache(articles: list[dict[str, Any]]) -> None:
+    ARTICLES_CACHE_JSON.parent.mkdir(parents=True, exist_ok=True)
+    ARTICLES_CACHE_JSON.write_text(
         json.dumps({"articles": articles}, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
@@ -1442,7 +1362,7 @@ def visitor_ip_card() -> str:
       <div class="visitor-ip-header">
         <div>
           <h2 class="section-title">开始检测</h2>
-          <p class="help">仅在点击后才会调用第三方检测服务，页面不会自动检测。</p>
+          <p class="help">仅在点击后才会调用第三方检测服务并加载 iplark.com 复核页面，页面不会自动检测。</p>
         </div>
         <button id="visitor-ip-refresh" type="button" class="button">开始检测</button>
       </div>
@@ -2263,6 +2183,16 @@ def write_index(articles: list[dict[str, Any]]) -> None:
     )
 
 
+def cleanup_unused_image_dirs(articles: list[dict[str, Any]]) -> None:
+    active_ids = {article.get("id") for article in articles if article.get("id")}
+    if not IMAGES_DIR.exists():
+        return
+
+    for image_dir in IMAGES_DIR.iterdir():
+        if image_dir.is_dir() and image_dir.name not in active_ids:
+            shutil.rmtree(image_dir)
+
+
 def build() -> None:
     cached_articles = load_cached_articles()
     ensure_dirs()
@@ -2273,18 +2203,22 @@ def build() -> None:
     urls = load_urls()
     articles = []
     for index, url in enumerate(urls):
-        if index > 0:
-            time.sleep(2)
-        article = fetch_article(url)
-        if not article.get("success") and url in cached_articles:
+        if not REFETCH_ALL and url in cached_articles:
             article = cached_articles[url]
+        else:
+            if index > 0:
+                time.sleep(2)
+            article = fetch_article(url)
+            if not article.get("success") and url in cached_articles:
+                article = cached_articles[url]
         article = localize_article_images(article)
         articles.append(article)
         write_article_page(article)
 
     articles = sort_articles_by_publish_time(articles)
+    cleanup_unused_image_dirs(articles)
     write_index(articles)
-    write_articles_json(articles)
+    write_articles_cache(articles)
 
 
 if __name__ == "__main__":

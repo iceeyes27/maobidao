@@ -20,7 +20,8 @@
 ├── requirements.txt
 ├── urls.txt
 ├── data/
-│   └── links.json
+│   ├── links.json
+│   └── articles-cache.json
 ├── scripts/
 │   ├── wechat_to_site.py
 │   └── wechat_account_watcher.py
@@ -29,13 +30,12 @@
 │       ├── submit.js
 │       └── visitor-ip-check.js
 ├── public/
+│   ├── _headers
 │   ├── index.html
 │   ├── submit.html
 │   ├── articles/
-│   ├── assets/
-│   │   └── style.css
-│   └── data/
-│       └── articles.json
+│   └── assets/
+│       └── style.css
 └── .github/
     └── workflows/
         └── build.yml
@@ -59,7 +59,15 @@ python -m pip install -r requirements.txt
 python scripts/wechat_to_site.py
 ```
 
+生成脚本默认复用 `data/articles-cache.json` 里已有的成功抓取结果，只抓取新增链接或尚未成功归档的链接。需要强制全量重新抓取时运行：
+
+```bash
+REFETCH_ALL=1 python scripts/wechat_to_site.py
+```
+
 生成结果位于 `public/`。可以直接打开 `public/index.html` 查看归档首页。
+
+> 维护约定：`public/` 下的 HTML、CSS 和 `_headers` 是部署产物/静态资源，页面内容主要由 `scripts/wechat_to_site.py` 生成。完整文章抓取缓存保存在 `data/articles-cache.json`，不会再发布到 `public/data/articles.json`。
 
 ## 本地监听公众号新文章
 
@@ -142,6 +150,14 @@ python scripts/wechat_to_site.py
 ```
 
 如果 `public/`、`data/` 或 `urls.txt` 有变化，会自动 commit 并 push 回仓库。工作流包含 `if: github.actor != 'github-actions[bot]'`，避免由机器人提交触发循环构建。
+
+## 提交接口防护建议
+
+`/api/submit` 会在校验管理密码后更新 GitHub 仓库中的 `data/links.json`。除设置强密码外，建议在 Cloudflare 侧为该路径增加至少一种外层保护：
+
+- WAF / Rate Limiting：限制同一 IP 对 `/api/submit` 的请求频率，尤其是 401 响应较多的请求。
+- Turnstile：如果后续配置 `TURNSTILE_SECRET_KEY`，可在服务端增加 token 校验。
+- Cloudflare Access：如果只有少数管理员使用，可直接把 `/submit` 和 `/api/submit` 放到 Access 后面。
 
 ## Cloudflare Pages 部署
 
@@ -232,7 +248,7 @@ IPDATA_API_KEY
 /visitor-ip
 ```
 
-页面会在你点击按钮后请求 `/api/visitor-ip-check`，读取当前访问者公网 IP，并调用以下三方服务：
+页面会在你点击按钮后请求 `/api/visitor-ip-check`，读取当前访问者公网 IP，并调用以下三方服务。同时页面会加载 `iplark.com` iframe 作为人工复核入口；如果对方站点不允许嵌入，可以点击页面上的按钮在新窗口打开。
 
 - AbuseIPDB：检查是否存在滥用记录。
 - IP2Location：根据线路用途类型判断是否更接近家宽。
@@ -252,10 +268,10 @@ IPDATA_API_KEY
 - WebRTC ICE 候选暴露检测（默认不配置 STUN 服务器，不额外连接第三方检测服务）
 - 三个来源各自的状态、摘要与关键字段
 
-页面也提供“开始检测”按钮；只有点击后才会向第三方服务发起查询。浏览器本地环境信息只在页面内渲染，不会额外发送给第三方服务；WebRTC 检测只读取本地 ICE 候选，不使用公共 STUN 服务器。
+页面也提供“开始检测”按钮；只有点击后才会向第三方服务发起查询并加载 `iplark.com` 复核页面。浏览器本地环境信息只在页面内渲染，不会额外发送给上述 IP 检测 API；WebRTC 检测只读取本地 ICE 候选，不使用公共 STUN 服务器。
 
 > 注意：
-> 点击检测后，当前访问者公网 IP 会被发送到上述第三方服务查询安全信息。请确保这符合你的站点使用场景和隐私预期。
+> 点击检测后，当前访问者公网 IP 会被发送到上述第三方服务查询安全信息，并会加载 `iplark.com` 复核页面。请确保这符合你的站点使用场景和隐私预期。
 
 ## 通过提交页添加链接
 
@@ -295,7 +311,7 @@ IPDATA_API_KEY
 
 ### 某篇文章抓取失败
 
-单篇文章抓取失败不会影响其他文章。失败信息会写入 `public/data/articles.json`，首页也会显示该条链接的失败状态。微信公众号页面可能因公开访问限制、临时网络问题或页面结构变化导致抓取失败；其他站点也可能因页面结构差异而无法完整提取正文。
+单篇文章抓取失败不会影响其他文章。失败原因会写入 `data/articles-cache.json`，但首页只展示成功归档的文章。微信公众号页面可能因公开访问限制、临时网络问题或页面结构变化导致抓取失败；其他站点也可能因页面结构差异而无法完整提取正文。
 
 ### 首页没有文章
 
