@@ -57,7 +57,7 @@ function buildOverallMessage(checks) {
 }
 
 function overallSuccess(checks) {
-  return Boolean(Object.values(checks).length > 0);
+  return Object.values(checks).some((item) => item.status === "ok");
 }
 
 
@@ -479,15 +479,17 @@ export async function onRequest({ request, env }) {
     }, 400);
   }
 
-  const abuse = hasProviderKey(env, "ABUSEIPDB_API_KEY")
-    ? await checkAbuseIpdb(ip, env, debugEnabled)
-    : providerNotConfigured("AbuseIPDB", "ABUSEIPDB_API_KEY");
-  const residential = hasProviderKey(env, "IP2LOCATION_API_KEY")
-    ? await checkIp2Location(ip, env, debugEnabled)
-    : providerNotConfigured("IP2Location", "IP2LOCATION_API_KEY");
-  const risk = hasProviderKey(env, "IPDATA_API_KEY")
-    ? await checkIpdata(ip, env, debugEnabled)
-    : providerNotConfigured("ipdata", "IPDATA_API_KEY");
+  const [abuse, residential, risk] = await Promise.all([
+    hasProviderKey(env, "ABUSEIPDB_API_KEY")
+      ? checkAbuseIpdb(ip, env, debugEnabled)
+      : providerNotConfigured("AbuseIPDB", "ABUSEIPDB_API_KEY"),
+    hasProviderKey(env, "IP2LOCATION_API_KEY")
+      ? checkIp2Location(ip, env, debugEnabled)
+      : providerNotConfigured("IP2Location", "IP2LOCATION_API_KEY"),
+    hasProviderKey(env, "IPDATA_API_KEY")
+      ? checkIpdata(ip, env, debugEnabled)
+      : providerNotConfigured("ipdata", "IPDATA_API_KEY"),
+  ]);
 
   const checks = { abuse, residential, risk };
   const message = buildOverallMessage(checks);
