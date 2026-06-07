@@ -393,6 +393,22 @@ textarea {
   grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
 }
 
+.visitor-ip-iplark-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.visitor-ip-iplark-frame {
+  display: block;
+  width: 100%;
+  min-height: 720px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+}
+
 .visitor-ip-provider-card,
 .visitor-ip-explainer-card {
   border: 1px solid var(--line);

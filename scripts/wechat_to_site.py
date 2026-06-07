@@ -913,6 +913,22 @@ textarea {
   grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
 }
 
+.visitor-ip-iplark-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.visitor-ip-iplark-frame {
+  display: block;
+  width: 100%;
+  min-height: 720px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+}
+
 .visitor-ip-provider-card,
 .visitor-ip-explainer-card {
   border: 1px solid var(--line);
@@ -1431,6 +1447,16 @@ def visitor_ip_card() -> str:
         <button id="visitor-ip-refresh" type="button" class="button">开始检测</button>
       </div>
       <div id="visitor-ip-status" class="result" role="status" aria-live="polite">点击上方按钮后开始检测。</div>
+      <section id="visitor-ip-iplark-panel" class="visitor-ip-block visitor-ip-iplark-panel" hidden>
+        <div class="visitor-ip-block-header">
+          <h2 class="section-title">iplark.com 复核</h2>
+          <p class="help">点击“开始检测”后会加载 iplark.com 页面供你复核；如果对方站点不允许嵌入，请使用新窗口打开。</p>
+        </div>
+        <div class="visitor-ip-iplark-actions">
+          <a class="button secondary" href="https://iplark.com/" target="_blank" rel="noopener noreferrer">新窗口打开 iplark.com</a>
+        </div>
+        <iframe id="visitor-ip-iplark-frame" class="visitor-ip-iplark-frame" title="iplark.com IP 检测" loading="lazy" referrerpolicy="no-referrer" data-src="https://iplark.com/"></iframe>
+      </section>
       <div id="visitor-ip-result" class="visitor-ip-result" hidden>
         <section class="visitor-ip-block">
           <h2 class="section-title">检测摘要</h2>
@@ -1652,6 +1678,8 @@ def visitor_ip_script() -> str:
         riskStatus: document.querySelector("#visitor-ip-risk-status"),
         riskProviderSummary: document.querySelector("#visitor-ip-risk-provider-summary"),
         riskDetails: document.querySelector("#visitor-ip-risk-details"),
+        iplarkPanel: document.querySelector("#visitor-ip-iplark-panel"),
+        iplarkFrame: document.querySelector("#visitor-ip-iplark-frame"),
         browserDetails: document.querySelector("#visitor-ip-browser-details"),
         localeDetails: document.querySelector("#visitor-ip-locale-details"),
         deviceDetails: document.querySelector("#visitor-ip-device-details"),
@@ -2047,6 +2075,7 @@ def visitor_ip_script() -> str:
 
       function renderProviderDetails(checks) {
         const abuse = checks && checks.abuse ? checks.abuse : null;
+        const residential = checks && checks.residential ? checks.residential : null;
         const risk = checks && checks.risk ? checks.risk : null;
 
         setProviderMeta(visitorIpElements.abuseStatus, visitorIpElements.abuseProviderSummary, abuse);
@@ -2089,9 +2118,20 @@ def visitor_ip_script() -> str:
         ]);
       }
 
+      function loadIplarkFrame() {
+        if (!visitorIpElements.iplarkPanel || !visitorIpElements.iplarkFrame) {
+          return;
+        }
+        visitorIpElements.iplarkPanel.hidden = false;
+        if (!visitorIpElements.iplarkFrame.src) {
+          visitorIpElements.iplarkFrame.src = visitorIpElements.iplarkFrame.dataset.src;
+        }
+      }
+
       async function loadVisitorIpCheck() {
         visitorIpRefresh.disabled = true;
         visitorIpResult.hidden = true;
+        loadIplarkFrame();
         setVisitorIpStatus("正在检测当前访问 IP...", true);
 
         try {
