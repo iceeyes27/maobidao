@@ -17,6 +17,11 @@
         <span class="meta-item"><span class="meta-key">发布时间</span><span class="meta-value">2026-06-08 14:24:23</span></span>
         <span class="meta-item"><span class="meta-key">抓取时间</span><span class="meta-value">2026-06-08 14:44:42</span></span>
       </div>
+
+      <div class="stats-inline">
+        <span class="meta-item"><span class="meta-key">阅读量</span><span id="article-pv" class="meta-value">加载中...</span></span>
+        <span id="article-stats-status" class="stats-status">正在准备统计...</span>
+      </div>
       <div class="source-card">
         <strong>原文来源</strong>
         <span>公众号：猫笔刀</span>
@@ -29,6 +34,54 @@
       <p class="links"><a href="https://mp.weixin.qq.com/s/tawawahDcLzx0NZN3Xrz_Q" target="_blank" rel="noopener noreferrer">查看原文链接</a></p>
     </article>
   </main>
+    <script>
+      const articlePv = document.querySelector("#article-pv");
+      const articleStatsStatus = document.querySelector("#article-stats-status");
 
+      function formatStatNumber(value) {
+        const number = Number(value);
+        return Number.isFinite(number) ? new Intl.NumberFormat("zh-CN").format(number) : "-";
+      }
+
+      function setArticleStatsStatus(message, isError = false) {
+        if (!articleStatsStatus) {
+          return;
+        }
+        articleStatsStatus.textContent = message;
+        articleStatsStatus.className = isError ? "stats-status error" : "stats-status";
+      }
+
+      async function loadArticleStats() {
+        try {
+          setArticleStatsStatus("正在统计当前阅读...", false);
+          const response = await fetch("/api/stats", {
+            method: "POST",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({page: "article", article_id: "84e8cf07db14cc2b09a2fff6f6b40d3f"})
+          });
+          const text = await response.text();
+          let data = {};
+          try {
+            data = text ? JSON.parse(text) : {};
+          } catch {
+            throw new Error(`统计接口没有返回 JSON，HTTP ${response.status}。`);
+          }
+          if (!response.ok || !data.success) {
+            throw new Error(data.message || `统计失败，HTTP ${response.status}。`);
+          }
+          if (articlePv) {
+            articlePv.textContent = formatStatNumber(data.article_pv);
+          }
+          setArticleStatsStatus(data.message || "已更新这篇文章的阅读量。", false);
+        } catch (error) {
+          if (articlePv) {
+            articlePv.textContent = "加载失败";
+          }
+          setArticleStatsStatus(error.message || "阅读量加载失败，请稍后重试。", true);
+        }
+      }
+
+      loadArticleStats();
+    </script>
 </body>
 </html>

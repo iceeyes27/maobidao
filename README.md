@@ -8,7 +8,8 @@
 
 不支持模拟微信登录。  
 不支持抓取评论。  
-不支持抓取阅读量、点赞数、在看数。  
+不支持抓取微信原文的阅读量、点赞数、在看数。  
+站内可选统计的是**本归档站自己的浏览量 / 阅读量**，不是微信官方原文数据。
 
 核心网站不会保存微信 Cookie、Token 或登录态。可选的本地监听脚本只读取本机配置文件，不会把登录态提交到 GitHub 或 Cloudflare。
 
@@ -28,7 +29,8 @@
 ├── functions/
 │   └── api/
 │       ├── submit.js
-│       └── visitor-ip-check.js
+│       ├── visitor-ip-check.js
+│       └── stats.js
 ├── public/
 │   ├── _headers
 │   ├── index.html
@@ -43,7 +45,22 @@
 
 Cloudflare Pages 发布目录设置为 `public`。
 
-如果使用 Cloudflare Workers Static Assets 的 Git 同步部署，本仓库也提供了 `wrangler.toml` 和 `worker.js`。静态资源仍从 `public/` 发布，`/api/submit` 与 `/api/visitor-ip-check` 都由 Worker 入口转发到同一套后端逻辑。
+如果使用 Cloudflare Workers Static Assets 的 Git 同步部署，本仓库也提供了 `wrangler.toml` 和 `worker.js`。静态资源仍从 `public/` 发布，`/api/submit`、`/api/visitor-ip-check` 与 `/api/stats` 都由 Worker 入口转发到同一套后端逻辑。
+
+## 站内浏览量 / 阅读量统计
+
+项目支持一套**站内自建**的轻量统计：
+
+- 首页显示站点累计 **PV（浏览量）** 与 **今日 UV（按天去重访客）**
+- 文章详情页显示该文章的累计 **阅读量**
+- 统计口径只覆盖首页和文章详情页，不统计提交页与访客 IP 工具页
+- 默认忽略明显机器人访问和预取 / 预渲染请求，尽量减少统计污染
+说明：
+
+- 这里统计的是**本归档站自己的访问数据**，不是微信原文后台数据。
+- UV 基于站点一方匿名 cookie 按天去重，不读取微信登录态。
+- 统计存储依赖 Cloudflare KV，绑定名为 `STATS_KV`。
+- 统计接口会尽量忽略明显 bot 和 prefetch / prerender 请求。
 
 ## 本地运行
 
@@ -169,10 +186,12 @@ Build command: 留空或不使用
 Build output directory: public
 ```
 
-保留 `functions/api/submit.js` 和 `functions/api/visitor-ip-check.js`，Cloudflare Pages 会将其作为 Pages Function 暴露为：
+保留 `functions/api/submit.js`、`functions/api/visitor-ip-check.js` 和 `functions/api/stats.js`，Cloudflare Pages 会将其作为 Pages Function 暴露为：
 
 ```text
 POST /api/submit
+POST /api/stats
+GET /api/stats
 GET /api/visitor-ip-check
 GET /api/visitor-ip-check?health=1
 ```
@@ -189,24 +208,26 @@ directory = "./public"
 binding = "ASSETS"
 ```
 
-`worker.js` 会把 `/api/submit` 和 `/api/visitor-ip-check` 转发给 `functions/api/` 下的接口，其他路径交给 `public/` 静态资源。
+`worker.js` 会把 `/api/submit`、`/api/visitor-ip-check` 和 `/api/stats` 转发给 `functions/api/` 下的接口，其他路径交给 `public/` 静态资源。
 
 部署后可以访问：
 
 ```text
 /api/submit
+/api/stats
 /api/visitor-ip-check?health=1
 ```
 
 如果 `/api/submit` 返回 `Submit API 已部署，环境变量已配置。`，说明提交通道已生效。  
+如果 `/api/stats` 的 `GET` 请求返回 `Stats API 已部署，KV 绑定已配置。`，说明浏览量统计接口与 KV 绑定已生效。  
 如果 `/api/visitor-ip-check?health=1` 返回 `Visitor IP Check API 已部署...`，说明访客 IP 检测接口已上线；即使缺少部分 key，接口仍可以返回当前访问者 IP。
 
-## Cloudflare 运行时环境变量
+## Cloudflare 运行时 Secret / 绑定
 
-按实际部署类型配置运行时变量：
+按实际部署类型分别配置：
 
-- Cloudflare Pages：在 Pages 项目的生产环境变量中配置。
-- Workers Static Assets：在对应 Worker 的 Variables and Secrets 中配置。
+- Cloudflare Pages：在项目设置里配置环境变量 / secrets，并额外添加 KV binding。
+- Workers Static Assets：在对应 Worker 的 Variables and Secrets 中配置 secret / 变量，并在 `wrangler.toml` 或控制台里配置 KV binding.
 
 ```text
 GITHUB_TOKEN
@@ -219,6 +240,12 @@ IP2LOCATION_API_KEY
 IPDATA_API_KEY
 ```
 
+另需配置：
+
+```text
+STATS_KV (Cloudflare KV binding)
+```
+
 说明：
 
 - `GITHUB_TOKEN`：GitHub Personal Access Token，只授予目标仓库 `contents:write` 权限。
@@ -226,19 +253,90 @@ IPDATA_API_KEY
 - `GITHUB_REPO`：GitHub 仓库名。
 - `GITHUB_BRANCH`：通常是 `main`，未设置时默认使用 `main`。
 - `SUBMIT_PASSWORD`：提交页面管理密码。
+- `STATS_KV`：Cloudflare KV 绑定，用于保存站点 PV、按日 UV 和文章阅读量。
 - `ABUSEIPDB_API_KEY`：AbuseIPDB 官方 API key。
 - `IP2LOCATION_API_KEY`：IP2Location 官方 API key。
 - `IPDATA_API_KEY`：ipdata 官方 API key。
 
-`GITHUB_TOKEN` 和三方 IP 查询 key 都只在后端运行时使用，不会出现在前端源码中。
+`GITHUB_TOKEN`、统计用的 `STATS_KV` 绑定和三方 IP 查询 key 都只在后端运行时使用，不会出现在前端源码中。
 
-如果项目使用 Workers Static Assets，`GITHUB_OWNER`、`GITHUB_REPO`、`GITHUB_BRANCH` 已写入 `wrangler.toml`。你至少需要在 Cloudflare Worker 的 Variables and Secrets 中添加 2 个必需 secret：`GITHUB_TOKEN`、`SUBMIT_PASSWORD`。如果你还想启用访客 IP 检测，再按需补充 3 个可选 secret：`ABUSEIPDB_API_KEY`、`IP2LOCATION_API_KEY`、`IPDATA_API_KEY`。
+如果项目使用 Workers Static Assets，`GITHUB_OWNER`、`GITHUB_REPO`、`GITHUB_BRANCH` 已写入 `wrangler.toml`。你至少需要在 Cloudflare Worker 的 Variables and Secrets 中添加 2 个必需 secret：`GITHUB_TOKEN`、`SUBMIT_PASSWORD`。如果你还想启用站内浏览量统计，请额外绑定一个名为 `STATS_KV` 的 Cloudflare KV namespace。如果你还想启用访客 IP 检测，再按需补充 3 个可选 secret：`ABUSEIPDB_API_KEY`、`IP2LOCATION_API_KEY`、`IPDATA_API_KEY`。
 
 这 3 个 IP 检测 key 可以按需逐步补齐：
 
 - 不配置任何 key：仍可显示当前访问者 IP 和大致位置。
 - 只配置部分 key：已配置的检测项正常返回，未配置项显示“未配置”。
 - 全部配置：滥用、家宽、风险三项都会完整检测。
+
+## Cloudflare KV 统计配置
+
+无论你使用 Cloudflare Pages 还是 Workers Static Assets，都需要额外准备一个 KV namespace 用于统计存储：
+
+- 绑定名固定为 `STATS_KV`
+- 用于保存站点累计 PV、按日 UV 和文章阅读量，以及匿名访客去重标记
+- 当前口径是**按日 UV**，不是累计 UV
+- 默认忽略明显机器人流量和 prefetch / prerender 请求，尽量减少统计污染
+
+### 实际操作步骤
+
+#### 方案 A：Cloudflare Pages
+
+1. 进入 Cloudflare 控制台。
+2. 打开 **Storage & Databases** → **KV**。
+3. 创建一个新的 KV namespace，例如命名为 `maobidao-stats`。
+4. 打开你的 Pages 项目 → **Settings** → **Bindings**。
+5. 新增一个 **KV namespace binding**：
+   - Variable name / Binding name：`STATS_KV`
+   - Namespace：选择刚才创建的 KV namespace
+6. 确认项目里原本的环境变量 / secrets 也都已配置：
+   - `GITHUB_TOKEN`
+   - `GITHUB_OWNER`
+   - `GITHUB_REPO`
+   - `GITHUB_BRANCH`
+   - `SUBMIT_PASSWORD`
+7. 重新部署一次 Pages 项目。
+8. 部署完成后访问：
+   - `https://你的域名/api/stats`
+9. 如果返回 `Stats API 已部署，KV 绑定已配置。`，说明统计接口已经可用。
+10. 再打开首页和任意文章页，确认：
+    - 首页能显示“站点浏览量”和“今日访客”
+    - 文章页能显示“阅读量”
+
+#### 方案 B：Workers Static Assets
+
+1. 进入 Cloudflare 控制台。
+2. 打开 **Storage & Databases** → **KV**。
+3. 创建一个新的 KV namespace，例如命名为 `maobidao-stats`。
+4. 记下这个 namespace 的正式 id；如果你区分预览环境，也同时记下 preview id。
+5. 打开项目根目录的 `wrangler.toml`，把下面占位值换成真实值：
+
+```toml
+[[kv_namespaces]]
+binding = "STATS_KV"
+id = "你的正式 namespace id"
+preview_id = "你的 preview namespace id"
+```
+
+6. 确认 Worker 运行时 secret / 变量已配置：
+   - `GITHUB_TOKEN`
+   - `SUBMIT_PASSWORD`
+   - 按需配置 `ABUSEIPDB_API_KEY`、`IP2LOCATION_API_KEY`、`IPDATA_API_KEY`
+7. 重新部署 Worker。
+8. 部署完成后访问：
+   - `https://你的域名/api/stats`
+9. 如果返回 `Stats API 已部署，KV 绑定已配置。`，说明统计接口已经可用。
+10. 再打开首页和任意文章页，确认：
+    - 首页能显示“站点浏览量”和“今日访客”
+    - 文章页能显示“阅读量”
+
+Workers Static Assets 可以直接在 `wrangler.toml` 的 `[[kv_namespaces]]` 中填写真实 namespace id；
+Cloudflare Pages 则需要在项目设置里添加同名 KV binding：`STATS_KV`。
+
+接口行为：
+
+- `POST /api/stats`：写入一次访问并返回最新统计值
+- `GET /api/stats`：检查统计接口和 KV 绑定是否已经配置完成
+- `GET /api/stats` 的返回里会说明当前 UV 口径、时区，以及是否启用了 bot / prefetch 过滤
 
 ## 访问 IP 检测工具
 

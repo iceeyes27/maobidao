@@ -229,6 +229,53 @@ button:disabled {
 .article-body img {
   height: auto;
 }
+.summary-panel {
+  margin-bottom: 24px;
+}
+
+.summary-grid {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+}
+
+.summary-stat {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #f8fafc;
+  padding: 16px;
+}
+
+.summary-stat strong {
+  display: block;
+  font-size: 22px;
+  line-height: 1.25;
+  color: var(--text);
+}
+
+.summary-stat span {
+  display: block;
+  margin-top: 6px;
+  color: var(--muted);
+  font-size: 14px;
+}
+
+.stats-inline {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 12px;
+  align-items: center;
+  margin-top: 12px;
+}
+
+.stats-status {
+  color: var(--muted);
+  font-size: 14px;
+}
+
+.stats-status.error {
+  color: var(--danger);
+}
 
 .source-card {
   margin: 16px 0 20px;

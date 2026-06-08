@@ -21,6 +21,19 @@
       </div>
       <p class="help">另有 1 条链接暂未归档成功，已从公开列表中隐藏。</p>
     </header>
+    <section class="panel summary-panel">
+      <header class="panel-header">
+        <h2 class="section-title">站点概览</h2>
+        <p id="site-stats-status" class="help stats-status">正在准备统计...</p>
+      </header>
+      <div class="summary-grid">
+        <div class="summary-stat"><strong>23 条</strong><span>已收录链接</span></div>
+        <div class="summary-stat"><strong>22 篇</strong><span>成功归档</span></div>
+        <div class="summary-stat"><strong>22 篇</strong><span>微信公众号</span></div>
+        <div class="summary-stat"><strong id="site-pv">加载中...</strong><span>站点浏览量</span></div>
+        <div class="summary-stat"><strong id="site-uv">加载中...</strong><span>今日访客</span></div>
+      </div>
+    </section>
     <section class="panel">
       <header class="panel-header">
         <h2 class="section-title">最新归档</h2>
@@ -359,6 +372,61 @@
     </ul>
     </section>
   </main>
+    <script>
+      const sitePv = document.querySelector("#site-pv");
+      const siteUv = document.querySelector("#site-uv");
+      const siteStatsStatus = document.querySelector("#site-stats-status");
 
+      function formatStatNumber(value) {
+        const number = Number(value);
+        return Number.isFinite(number) ? new Intl.NumberFormat("zh-CN").format(number) : "-";
+      }
+
+      function setSiteStatsStatus(message, isError = false) {
+        if (!siteStatsStatus) {
+          return;
+        }
+        siteStatsStatus.textContent = message;
+        siteStatsStatus.className = isError ? "help stats-status error" : "help stats-status";
+      }
+
+      async function loadSiteStats() {
+        try {
+          setSiteStatsStatus("正在统计当前访问...", false);
+          const response = await fetch("/api/stats", {
+            method: "POST",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({page: "site"})
+          });
+          const text = await response.text();
+          let data = {};
+          try {
+            data = text ? JSON.parse(text) : {};
+          } catch {
+            throw new Error(`统计接口没有返回 JSON，HTTP ${response.status}。`);
+          }
+          if (!response.ok || !data.success) {
+            throw new Error(data.message || `统计失败，HTTP ${response.status}。`);
+          }
+          if (sitePv) {
+            sitePv.textContent = formatStatNumber(data.site_pv);
+          }
+          if (siteUv) {
+            siteUv.textContent = formatStatNumber(data.site_uv);
+          }
+          setSiteStatsStatus(data.message || "已更新本站浏览量和今日访客数。", false);
+        } catch (error) {
+          if (sitePv) {
+            sitePv.textContent = "加载失败";
+          }
+          if (siteUv) {
+            siteUv.textContent = "加载失败";
+          }
+          setSiteStatsStatus(error.message || "统计加载失败，请稍后重试。", true);
+        }
+      }
+
+      loadSiteStats();
+    </script>
 </body>
 </html>

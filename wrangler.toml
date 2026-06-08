@@ -11,6 +11,11 @@ GITHUB_BRANCH = "main"
 [secrets]
 required = ["GITHUB_TOKEN", "SUBMIT_PASSWORD"]
 
+[[kv_namespaces]]
+binding = "STATS_KV"
+id = "YOUR_STATS_KV_NAMESPACE_ID"
+preview_id = "YOUR_STATS_KV_PREVIEW_NAMESPACE_ID"
+
 [assets]
 directory = "./public"
 binding = "ASSETS"

@@ -803,6 +803,53 @@ button:disabled {
 .article-body img {
   height: auto;
 }
+.summary-panel {
+  margin-bottom: 24px;
+}
+
+.summary-grid {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+}
+
+.summary-stat {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #f8fafc;
+  padding: 16px;
+}
+
+.summary-stat strong {
+  display: block;
+  font-size: 22px;
+  line-height: 1.25;
+  color: var(--text);
+}
+
+.summary-stat span {
+  display: block;
+  margin-top: 6px;
+  color: var(--muted);
+  font-size: 14px;
+}
+
+.stats-inline {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 12px;
+  align-items: center;
+  margin-top: 12px;
+}
+
+.stats-status {
+  color: var(--muted);
+  font-size: 14px;
+}
+
+.stats-status.error {
+  color: var(--danger);
+}
 
 .source-card {
   margin: 16px 0 20px;
@@ -1131,7 +1178,122 @@ def build_summary_stats(articles: list[dict[str, Any]]) -> str:
         f'<div class="summary-stat"><strong>{format_stat_label(total, "条")}</strong><span>已收录链接</span></div>',
         f'<div class="summary-stat"><strong>{format_stat_label(success, "篇")}</strong><span>成功归档</span></div>',
         f'<div class="summary-stat"><strong>{format_stat_label(wechat, "篇")}</strong><span>微信公众号</span></div>',
+        '<div class="summary-stat"><strong id="site-pv">加载中...</strong><span>站点浏览量</span></div>',
+        '<div class="summary-stat"><strong id="site-uv">加载中...</strong><span>今日访客</span></div>',
     ])
+
+
+
+def site_stats_script() -> str:
+    return """    <script>
+      const sitePv = document.querySelector("#site-pv");
+      const siteUv = document.querySelector("#site-uv");
+      const siteStatsStatus = document.querySelector("#site-stats-status");
+
+      function formatStatNumber(value) {
+        const number = Number(value);
+        return Number.isFinite(number) ? new Intl.NumberFormat("zh-CN").format(number) : "-";
+      }
+
+      function setSiteStatsStatus(message, isError = false) {
+        if (!siteStatsStatus) {
+          return;
+        }
+        siteStatsStatus.textContent = message;
+        siteStatsStatus.className = isError ? "help stats-status error" : "help stats-status";
+      }
+
+      async function loadSiteStats() {
+        try {
+          setSiteStatsStatus("正在统计当前访问...", false);
+          const response = await fetch("/api/stats", {
+            method: "POST",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify({page: "site"})
+          });
+          const text = await response.text();
+          let data = {};
+          try {
+            data = text ? JSON.parse(text) : {};
+          } catch {
+            throw new Error(`统计接口没有返回 JSON，HTTP ${response.status}。`);
+          }
+          if (!response.ok || !data.success) {
+            throw new Error(data.message || `统计失败，HTTP ${response.status}。`);
+          }
+          if (sitePv) {
+            sitePv.textContent = formatStatNumber(data.site_pv);
+          }
+          if (siteUv) {
+            siteUv.textContent = formatStatNumber(data.site_uv);
+          }
+          setSiteStatsStatus(data.message || "已更新本站浏览量和今日访客数。", false);
+        } catch (error) {
+          if (sitePv) {
+            sitePv.textContent = "加载失败";
+          }
+          if (siteUv) {
+            siteUv.textContent = "加载失败";
+          }
+          setSiteStatsStatus(error.message || "统计加载失败，请稍后重试。", true);
+        }
+      }
+
+      loadSiteStats();
+    </script>"""
+
+
+
+def article_stats_script(article_id: str) -> str:
+    return f"""    <script>
+      const articlePv = document.querySelector("#article-pv");
+      const articleStatsStatus = document.querySelector("#article-stats-status");
+
+      function formatStatNumber(value) {{
+        const number = Number(value);
+        return Number.isFinite(number) ? new Intl.NumberFormat("zh-CN").format(number) : "-";
+      }}
+
+      function setArticleStatsStatus(message, isError = false) {{
+        if (!articleStatsStatus) {{
+          return;
+        }}
+        articleStatsStatus.textContent = message;
+        articleStatsStatus.className = isError ? "stats-status error" : "stats-status";
+      }}
+
+      async function loadArticleStats() {{
+        try {{
+          setArticleStatsStatus("正在统计当前阅读...", false);
+          const response = await fetch("/api/stats", {{
+            method: "POST",
+            headers: {{"Content-Type": "application/json"}},
+            body: JSON.stringify({{page: "article", article_id: "{article_id}"}})
+          }});
+          const text = await response.text();
+          let data = {{}};
+          try {{
+            data = text ? JSON.parse(text) : {{}};
+          }} catch {{
+            throw new Error(`统计接口没有返回 JSON，HTTP ${{response.status}}。`);
+          }}
+          if (!response.ok || !data.success) {{
+            throw new Error(data.message || `统计失败，HTTP ${{response.status}}。`);
+          }}
+          if (articlePv) {{
+            articlePv.textContent = formatStatNumber(data.article_pv);
+          }}
+          setArticleStatsStatus(data.message || "已更新这篇文章的阅读量。", false);
+        }} catch (error) {{
+          if (articlePv) {{
+            articlePv.textContent = "加载失败";
+          }}
+          setArticleStatsStatus(error.message || "阅读量加载失败，请稍后重试。", true);
+        }}
+      }}
+
+      loadArticleStats();
+    </script>"""
 
 
 
@@ -1143,6 +1305,11 @@ def write_article_page(article: dict[str, Any]) -> None:
     source_card_html = f"      <div class=\"source-card\">\n        {source_card}\n      </div>" if source_card else ""
     source_title = article.get("account_name") or article.get("source_host") or "公开文章归档"
     page_title = f"{article.get('title') or '文章详情'} - {source_title} - 公开文章归档"
+    article_stats_html = """
+      <div class="stats-inline">
+        <span class="meta-item"><span class="meta-key">阅读量</span><span id="article-pv" class="meta-value">加载中...</span></span>
+        <span id="article-stats-status" class="stats-status">正在准备统计...</span>
+      </div>"""
     if not article.get("success"):
         error = html.escape(article.get("error") or "抓取失败")
         content_html = f'<p class="result error">{error}</p>'
@@ -1153,6 +1320,7 @@ def write_article_page(article: dict[str, Any]) -> None:
       <div class="meta">
         {article_meta(article)}
       </div>
+{article_stats_html}
 {source_card_html}
       <div class="article-body">
 {content_html}
@@ -1163,6 +1331,7 @@ def write_article_page(article: dict[str, Any]) -> None:
         page_shell(
             page_title,
             body,
+            article_stats_script(article["id"]),
             description=f"{article.get('title') or '文章详情'} 的归档页，保留原文来源与抓取信息。",
         ),
         encoding="utf-8",
@@ -2122,6 +2291,7 @@ def write_index(articles: list[dict[str, Any]]) -> None:
     successful_articles = [article for article in articles if article.get("success")]
     failed_count = len(articles) - len(successful_articles)
     items = []
+    summary_stats_html = build_summary_stats(articles)
     for article in successful_articles:
         title = html.escape(article.get("title") or "未命名文章")
         detail_href = article_detail_path(article)
@@ -2166,6 +2336,15 @@ def write_index(articles: list[dict[str, Any]]) -> None:
       </div>
       {failure_note}
     </header>
+    <section class="panel summary-panel">
+      <header class="panel-header">
+        <h2 class="section-title">站点概览</h2>
+        <p id="site-stats-status" class="help stats-status">正在准备统计...</p>
+      </header>
+      <div class="summary-grid">
+        {summary_stats_html}
+      </div>
+    </section>
     <section class="panel">
       <header class="panel-header">
         <h2 class="section-title">最新归档</h2>
@@ -2177,6 +2356,7 @@ def write_index(articles: list[dict[str, Any]]) -> None:
         page_shell(
             "公开文章归档",
             body,
+            site_stats_script(),
             description="手动收录公开文章链接，优先适配微信公众号文章，提供稳定的归档阅读页与原文入口。",
         ),
         encoding="utf-8",
