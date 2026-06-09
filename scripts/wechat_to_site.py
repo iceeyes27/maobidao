@@ -804,34 +804,39 @@ button:disabled {
   height: auto;
 }
 .summary-panel {
-  margin-bottom: 24px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  align-items: center;
+  justify-content: space-between;
+  margin: 4px 0 20px;
 }
 
 .summary-grid {
-  display: grid;
-  gap: 12px;
-  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 
 .summary-stat {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
   border: 1px solid var(--line);
-  border-radius: 8px;
-  background: #f8fafc;
-  padding: 16px;
+  border-radius: 999px;
+  background: #fff;
+  padding: 5px 10px;
 }
 
 .summary-stat strong {
-  display: block;
-  font-size: 22px;
-  line-height: 1.25;
+  font-size: 16px;
+  line-height: 1.2;
   color: var(--text);
 }
 
 .summary-stat span {
-  display: block;
-  margin-top: 6px;
   color: var(--muted);
-  font-size: 14px;
+  font-size: 13px;
 }
 
 .stats-inline {
@@ -1173,13 +1178,11 @@ def format_stat_label(value: int, unit: str) -> str:
 def build_summary_stats(articles: list[dict[str, Any]]) -> str:
     total = len(articles)
     success = sum(1 for article in articles if article.get("success"))
-    wechat = sum(1 for article in articles if (article.get("source_host") or source_host(article.get("url", ""))) == "mp.weixin.qq.com")
     return "\n        ".join([
-        f'<div class="summary-stat"><strong>{format_stat_label(total, "条")}</strong><span>已收录链接</span></div>',
-        f'<div class="summary-stat"><strong>{format_stat_label(success, "篇")}</strong><span>成功归档</span></div>',
-        f'<div class="summary-stat"><strong>{format_stat_label(wechat, "篇")}</strong><span>微信公众号</span></div>',
-        '<div class="summary-stat"><strong id="site-pv">加载中...</strong><span>站点浏览量</span></div>',
-        '<div class="summary-stat"><strong id="site-uv">加载中...</strong><span>今日访客</span></div>',
+        f'<span class="summary-stat"><strong>{format_stat_label(total, "条")}</strong><span>收录</span></span>',
+        f'<span class="summary-stat"><strong>{format_stat_label(success, "篇")}</strong><span>归档</span></span>',
+        '<span class="summary-stat"><strong id="site-pv">-</strong><span>浏览</span></span>',
+        '<span class="summary-stat"><strong id="site-uv">-</strong><span>今日访客</span></span>',
     ])
 
 
@@ -1226,7 +1229,7 @@ def site_stats_script() -> str:
           if (siteUv) {
             siteUv.textContent = formatStatNumber(data.site_uv);
           }
-          setSiteStatsStatus(data.message || "已更新本站浏览量和今日访客数。", false);
+          setSiteStatsStatus("统计已更新。", false);
         } catch (error) {
           if (sitePv) {
             sitePv.textContent = "加载失败";
@@ -2362,14 +2365,11 @@ def write_index(articles: list[dict[str, Any]]) -> None:
       </div>
       {failure_note}
     </header>
-    <section class="panel summary-panel">
-      <header class="panel-header">
-        <h2 class="section-title">站点概览</h2>
-        <p id="site-stats-status" class="help stats-status">正在准备统计...</p>
-      </header>
+    <section class="summary-panel" aria-label="站点概览">
       <div class="summary-grid">
         {summary_stats_html}
       </div>
+      <p id="site-stats-status" class="help stats-status">正在准备统计...</p>
     </section>
     <section class="panel">
       <header class="panel-header">

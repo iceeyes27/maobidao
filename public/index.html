@@ -21,18 +21,14 @@
       </div>
       <p class="help">另有 1 条链接暂未归档成功，已从公开列表中隐藏。</p>
     </header>
-    <section class="panel summary-panel">
-      <header class="panel-header">
-        <h2 class="section-title">站点概览</h2>
-        <p id="site-stats-status" class="help stats-status">正在准备统计...</p>
-      </header>
+    <section class="summary-panel" aria-label="站点概览">
       <div class="summary-grid">
-        <div class="summary-stat"><strong>23 条</strong><span>已收录链接</span></div>
-        <div class="summary-stat"><strong>22 篇</strong><span>成功归档</span></div>
-        <div class="summary-stat"><strong>22 篇</strong><span>微信公众号</span></div>
-        <div class="summary-stat"><strong id="site-pv">加载中...</strong><span>站点浏览量</span></div>
-        <div class="summary-stat"><strong id="site-uv">加载中...</strong><span>今日访客</span></div>
+        <span class="summary-stat"><strong>23 条</strong><span>收录</span></span>
+        <span class="summary-stat"><strong>22 篇</strong><span>归档</span></span>
+        <span class="summary-stat"><strong id="site-pv">-</strong><span>浏览</span></span>
+        <span class="summary-stat"><strong id="site-uv">-</strong><span>今日访客</span></span>
       </div>
+      <p id="site-stats-status" class="help stats-status">正在准备统计...</p>
     </section>
     <section class="panel">
       <header class="panel-header">
@@ -415,7 +411,7 @@
           if (siteUv) {
             siteUv.textContent = formatStatNumber(data.site_uv);
           }
-          setSiteStatsStatus(data.message || "已更新本站浏览量和今日访客数。", false);
+          setSiteStatsStatus("统计已更新。", false);
         } catch (error) {
           if (sitePv) {
             sitePv.textContent = "加载失败";
