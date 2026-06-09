@@ -13,8 +13,8 @@ required = ["GITHUB_TOKEN", "SUBMIT_PASSWORD"]
 
 [[kv_namespaces]]
 binding = "STATS_KV"
-id = "YOUR_STATS_KV_NAMESPACE_ID"
-preview_id = "YOUR_STATS_KV_PREVIEW_NAMESPACE_ID"
+id = "c25b289b65284d0c8e7ba329dc0a4c12"
+preview_id = "c25b289b65284d0c8e7ba329dc0a4c12"
 
 [assets]
 directory = "./public"
