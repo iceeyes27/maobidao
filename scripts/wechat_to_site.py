@@ -1183,7 +1183,6 @@ def build_summary_stats(articles: list[dict[str, Any]]) -> str:
     ])
 
 
-
 def site_stats_script() -> str:
     return """    <script>
       const sitePv = document.querySelector("#site-pv");
@@ -1339,6 +1338,7 @@ def write_article_page(article: dict[str, Any]) -> None:
 
 
 
+
 def write_submit_page() -> None:
     body = """    <section class="panel">
       <header class="site-header">
@@ -1487,9 +1487,20 @@ def article_detail_path(article: dict[str, Any]) -> str:
 
 def article_meta(article: dict[str, Any]) -> str:
     items = []
-    if article.get("account_name"):
+    host = article.get("source_host") or source_host(article.get("url", ""))
+    is_wechat = article.get("source_name") == "微信公众号" or host == "mp.weixin.qq.com"
+    if is_wechat:
+        if article.get("account_name"):
+            items.append(
+                f'<span class="meta-item"><span class="meta-key">公众号</span><span class="meta-value">{html.escape(article["account_name"])}</span></span>'
+            )
+    elif article.get("account_name"):
         items.append(
-            f'<span class="meta-item"><span class="meta-key">公众号</span><span class="meta-value">{html.escape(article["account_name"])}</span></span>'
+            f'<span class="meta-item"><span class="meta-key">作者</span><span class="meta-value">{html.escape(article["account_name"])}</span></span>'
+        )
+    if host and not is_wechat:
+        items.append(
+            f'<span class="meta-item"><span class="meta-key">来源</span><span class="meta-value">{html.escape(host)}</span></span>'
         )
     if article.get("publish_time"):
         items.append(
@@ -1499,22 +1510,37 @@ def article_meta(article: dict[str, Any]) -> str:
         items.append(
             f'<span class="meta-item"><span class="meta-key">抓取时间</span><span class="meta-value">{html.escape(article["fetched_at"])}</span></span>'
         )
+    if not article.get("success"):
+        items.append(
+            '<span class="meta-item"><span class="meta-key">状态</span><span class="meta-value">抓取失败</span></span>'
+        )
     return "\n        ".join(items)
 
 
 
 def list_source_label(article: dict[str, Any]) -> str:
-    source_name = clean_text(article.get("source_name") or article.get("source_host") or "来源站点")
-    return html.escape(source_name)
+    host = article.get("source_host") or source_host(article.get("url", ""))
+    is_wechat = article.get("source_name") == "微信公众号" or host == "mp.weixin.qq.com"
+    if is_wechat and article.get("account_name"):
+        return f"公众号 · {html.escape(article['account_name'])}"
+    if article.get("account_name"):
+        return f"作者 · {html.escape(article['account_name'])}"
+    if host:
+        return f"来源 · {html.escape(host)}"
+    return "来源未识别"
 
 
 
 def detail_source_card(article: dict[str, Any]) -> str:
     rows = ["<strong>原文来源</strong>"]
-    if article.get("account_name"):
+    host = article.get("source_host") or source_host(article.get("url", ""))
+    is_wechat = article.get("source_name") == "微信公众号" or host == "mp.weixin.qq.com"
+    if is_wechat and article.get("account_name"):
         rows.append(f'<span>公众号：{html.escape(article["account_name"])}</span>')
-    if article.get("source_host"):
-        rows.append(f'<span>站点：{html.escape(article["source_host"])}</span>')
+    elif article.get("account_name"):
+        rows.append(f'<span>作者：{html.escape(article["account_name"])}</span>')
+    if host:
+        rows.append(f'<span>站点：{html.escape(host)}</span>')
     rows.append(
         f'<a href="{html.escape(article["url"], quote=True)}" target="_blank" rel="noopener noreferrer">查看原文</a>'
     )
@@ -1824,7 +1850,7 @@ def visitor_ip_script() -> str:
         if (value.includes(":")) {
           return "IPv6";
         }
-        if (/^\d+\.\d+\.\d+\.\d+$/.test(value)) {
+        if (/^\\d+\\.\\d+\\.\\d+\\.\\d+$/.test(value)) {
           return "IPv4";
         }
         return "未知";
@@ -1947,11 +1973,11 @@ def visitor_ip_script() -> str:
       function parseBrowserInfo(userAgent) {
         const ua = String(userAgent || "");
         const browserRules = [
-          [/Edg\/(\d+)/, "Microsoft Edge"],
-          [/OPR\/(\d+)/, "Opera"],
-          [/Chrome\/(\d+)/, "Chrome"],
-          [/Firefox\/(\d+)/, "Firefox"],
-          [/Version\/(\d+).+Safari\//, "Safari"],
+          [/Edg\\/(\\d+)/, "Microsoft Edge"],
+          [/OPR\\/(\\d+)/, "Opera"],
+          [/Chrome\\/(\\d+)/, "Chrome"],
+          [/Firefox\\/(\\d+)/, "Firefox"],
+          [/Version\\/(\\d+).+Safari\\//, "Safari"],
         ];
         const osRules = [
           [/Windows NT 10/, "Windows 10/11"],
@@ -2131,7 +2157,7 @@ def visitor_ip_script() -> str:
       }
 
       function extractWebRtcAddress(candidate) {
-        const parts = String(candidate || "").split(/\s+/);
+        const parts = String(candidate || "").split(/\\s+/);
         const hostIndex = parts.findIndex((part) => part === "typ");
         const address = parts[4] || "";
         if (address && (address.includes(".") || address.includes(":"))) {
@@ -2148,7 +2174,7 @@ def visitor_ip_script() -> str:
       }
 
       function isPrivateCandidateAddress(address) {
-        if (!/^\d+\.\d+\.\d+\.\d+$/.test(address)) {
+        if (!/^\\d+\\.\\d+\\.\\d+\\.\\d+$/.test(address)) {
           return false;
         }
         const [a, b] = address.split(".").map(Number);
@@ -2156,7 +2182,7 @@ def visitor_ip_script() -> str:
       }
 
       function isPublicCandidateAddress(address) {
-        if (!/^\d+\.\d+\.\d+\.\d+$/.test(address)) {
+        if (!/^\\d+\\.\\d+\\.\\d+\\.\\d+$/.test(address)) {
           return false;
         }
         return !isPrivateCandidateAddress(address);
