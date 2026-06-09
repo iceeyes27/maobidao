@@ -772,6 +772,23 @@ button:disabled {
   font-size: 14px;
 }
 
+.article-summary {
+  margin: 12px 0 0;
+  color: var(--muted);
+  font-size: 15px;
+  line-height: 1.7;
+}
+
+.article-summary a {
+  display: block;
+  color: inherit;
+}
+
+.article-summary a:hover {
+  color: var(--accent);
+  text-decoration: none;
+}
+
 .links {
   display: flex;
   flex-wrap: wrap;
@@ -1518,6 +1535,16 @@ def article_meta(article: dict[str, Any]) -> str:
             '<span class="meta-item"><span class="meta-key">状态</span><span class="meta-value">抓取失败</span></span>'
         )
     return "\n        ".join(items)
+
+
+
+def article_summary(article: dict[str, Any], limit: int = 110) -> str:
+    text = clean_text(article.get("content_text") or "")
+    if not text:
+        return "阅读全文。"
+    if len(text) <= limit:
+        return text
+    return text[:limit].rstrip("，。；、,. ") + "..."
 
 
 
@@ -2324,7 +2351,7 @@ def write_index(articles: list[dict[str, Any]]) -> None:
     for article in successful_articles:
         title = html.escape(article.get("title") or "未命名文章")
         detail_href = article_detail_path(article)
-        original_href = html.escape(article["url"], quote=True)
+        summary = html.escape(article_summary(article))
         meta_html = article_meta(article)
         meta_block = f'<div class="article-meta">\n          {meta_html}\n        </div>' if meta_html else ""
         source_label = list_source_label(article)
@@ -2335,10 +2362,7 @@ def write_index(articles: list[dict[str, Any]]) -> None:
           <span class="source-badge">{source_label}</span>
         </div>
         {meta_block}
-        <div class="links">
-          <a href="{detail_href}">查看归档页</a>
-          <a href="{original_href}" target="_blank" rel="noopener noreferrer">查看原文</a>
-        </div>
+        <p class="article-summary"><a href="{detail_href}">{summary}</a></p>
       </li>"""
         )
 

@@ -198,6 +198,23 @@ button:disabled {
   font-size: 14px;
 }
 
+.article-summary {
+  margin: 12px 0 0;
+  color: var(--muted);
+  font-size: 15px;
+  line-height: 1.7;
+}
+
+.article-summary a {
+  display: block;
+  color: inherit;
+}
+
+.article-summary a:hover {
+  color: var(--accent);
+  text-decoration: none;
+}
+
 .links {
   display: flex;
   flex-wrap: wrap;
