@@ -144,6 +144,12 @@ async function writeGithubFile(env, sha, data) {
     body: JSON.stringify(body),
   });
 
+  if (response.status === 409) {
+    const conflict = new Error("SHA 冲突，需要重试");
+    conflict.isConflict = true;
+    throw conflict;
+  }
+
   if (!response.ok) {
     throw new Error(await githubErrorMessage(response, "更新链接库失败"));
   }
@@ -205,40 +211,51 @@ export async function onRequest({ request, env }) {
     return jsonResponse({ success: false, message: "没有有效的文章链接。" }, 400);
   }
 
-  try {
-    const { sha, data } = await readGithubFile(env);
-    const existingLinks = new Set(
-      data.links
-        .map((item) => normalizeLink(item && item.url ? item.url : item))
-        .filter(Boolean),
-    );
-    const now = new Date().toISOString().replace("T", " ").replace(/\.\d+Z$/, "");
-    const additions = [];
+  const MAX_RETRIES = 3;
+  let lastError;
 
-    for (const link of links) {
-      if (existingLinks.has(link)) {
+  for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+    try {
+      const { sha, data } = await readGithubFile(env);
+      const existingLinks = new Set(
+        data.links
+          .map((item) => normalizeLink(item && item.url ? item.url : item))
+          .filter(Boolean),
+      );
+      const now = new Date().toISOString().replace("T", " ").replace(/\.\d+Z$/, "");
+      const additions = [];
+
+      for (const link of links) {
+        if (existingLinks.has(link)) {
+          continue;
+        }
+        existingLinks.add(link);
+        additions.push({
+          url: link,
+          created_at: now,
+          source: "submit_page",
+        });
+      }
+
+      if (additions.length > 0) {
+        data.links.push(...additions);
+        await writeGithubFile(env, sha, data);
+      }
+
+      return jsonResponse({
+        success: true,
+        added: additions.length,
+        total: data.links.length,
+        message: "提交成功，稍后网站会自动更新。",
+      });
+    } catch (error) {
+      if (error.isConflict && attempt < MAX_RETRIES - 1) {
+        lastError = error;
         continue;
       }
-      existingLinks.add(link);
-      additions.push({
-        url: link,
-        created_at: now,
-        source: "submit_page",
-      });
+      return jsonResponse({ success: false, message: error.message || "服务端更新失败，请稍后重试。" }, 500);
     }
-
-    if (additions.length > 0) {
-      data.links.push(...additions);
-      await writeGithubFile(env, sha, data);
-    }
-
-    return jsonResponse({
-      success: true,
-      added: additions.length,
-      total: data.links.length,
-      message: "提交成功，稍后网站会自动更新。",
-    });
-  } catch (error) {
-    return jsonResponse({ success: false, message: error.message || "服务端更新失败，请稍后重试。" }, 500);
   }
+
+  return jsonResponse({ success: false, message: lastError?.message || "服务端更新失败，请稍后重试。" }, 500);
 }

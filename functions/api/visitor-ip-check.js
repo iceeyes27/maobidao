@@ -1,4 +1,6 @@
-const PROVIDER_TIMEOUT_MS = 10000;
+const PROVIDER_TIMEOUT_MS = 5000;
+const IP_CACHE_PREFIX = "ipcache:";
+const IP_CACHE_TTL_SECONDS = 3600;
 const PROVIDER_ENV_KEYS = [
   "ABUSEIPDB_API_KEY",
   "IP2LOCATION_API_KEY",
@@ -44,6 +46,9 @@ function buildOverallMessage(checks) {
   if (okCount > 0 && notConfiguredCount > 0 && errorCount === 0) {
     return `已识别当前访问 IP，已完成 ${okCount} 项检测，另有 ${notConfiguredCount} 项未配置。`;
   }
+  if (okCount > 0 && notConfiguredCount > 0 && errorCount > 0) {
+    return `已识别当前访问 IP，已完成 ${okCount} 项检测，另有 ${notConfiguredCount} 项未配置、${errorCount} 项查询失败。`;
+  }
   if (okCount > 0 && errorCount > 0) {
     return `已识别当前访问 IP，已完成 ${okCount} 项检测，另有 ${errorCount} 项查询失败。`;
   }
@@ -85,6 +90,7 @@ function isPrivateIpv4(ip) {
     a === 10
     || a === 127
     || a === 0
+    || (a === 100 && b >= 64 && b <= 127)
     || (a === 169 && b === 254)
     || (a === 172 && b >= 16 && b <= 31)
     || (a === 192 && b === 168)
@@ -116,20 +122,9 @@ function isPublicIp(ip) {
 }
 
 function readVisitorIp(request) {
-  const candidates = [
-    request.headers.get("cf-connecting-ip"),
-    request.headers.get("x-forwarded-for"),
-    request.headers.get("x-real-ip"),
-  ];
-
-  for (const candidate of candidates) {
-    const ip = firstHeaderValue(candidate);
-    if (ip) {
-      return ip;
-    }
-  }
-
-  return "";
+  // cf-connecting-ip is injected by Cloudflare and cannot be spoofed by the client.
+  // x-forwarded-for is client-controlled before Cloudflare rewrites it, so we don't trust it.
+  return firstHeaderValue(request.headers.get("cf-connecting-ip"));
 }
 
 async function parseJsonSafe(response) {
@@ -173,16 +168,6 @@ function attachDebugPayload(result, enabled, raw) {
       raw,
     },
   };
-}
-
-function boolLabel(value, yesLabel = "是", noLabel = "否") {
-  if (value === true) {
-    return yesLabel;
-  }
-  if (value === false) {
-    return noLabel;
-  }
-  return "未知";
 }
 
 function normalizeText(value) {
@@ -401,10 +386,11 @@ async function checkIp2Location(ip, env, debugEnabled = false) {
 async function checkIpdata(ip, env, debugEnabled = false) {
   try {
     const data = await providerFetchJson(
-      `https://api.ipdata.co/${encodeURIComponent(ip)}?api-key=${encodeURIComponent(env.IPDATA_API_KEY)}`,
+      `https://api.ipdata.co/${encodeURIComponent(ip)}`,
       {
         headers: {
           Accept: "application/json",
+          "api-key": env.IPDATA_API_KEY,
         },
       },
       "ipdata 查询失败",
@@ -412,6 +398,27 @@ async function checkIpdata(ip, env, debugEnabled = false) {
     return attachDebugPayload(buildIpdataRiskResult(data), debugEnabled, data);
   } catch (error) {
     return attachDebugPayload(providerError("ipdata", error), debugEnabled, error && error.providerData ? error.providerData : null);
+  }
+}
+
+async function getCachedResult(env, ip) {
+  if (!env.STATS_KV) return null;
+  try {
+    const raw = await env.STATS_KV.get(`${IP_CACHE_PREFIX}${ip}`);
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
+
+async function setCachedResult(env, ip, data) {
+  if (!env.STATS_KV) return;
+  try {
+    await env.STATS_KV.put(`${IP_CACHE_PREFIX}${ip}`, JSON.stringify(data), {
+      expirationTtl: IP_CACHE_TTL_SECONDS,
+    });
+  } catch {
+    // cache write failure is non-fatal
   }
 }
 
@@ -479,6 +486,13 @@ export async function onRequest({ request, env }) {
     }, 400);
   }
 
+  if (!debugEnabled) {
+    const cached = await getCachedResult(env, ip);
+    if (cached) {
+      return jsonResponse({ ...cached, cached: true, visitor_network: normalizeVisitorNetwork(request) });
+    }
+  }
+
   const [abuse, residential, risk] = await Promise.all([
     hasProviderKey(env, "ABUSEIPDB_API_KEY")
       ? checkAbuseIpdb(ip, env, debugEnabled)
@@ -495,7 +509,7 @@ export async function onRequest({ request, env }) {
   const message = buildOverallMessage(checks);
   const missing = missingProviderEnvKeys(env);
 
-  return jsonResponse({
+  const result = {
     success: overallSuccess(checks),
     ip,
     message,
@@ -506,7 +520,10 @@ export async function onRequest({ request, env }) {
       ? "打开页面后，当前访问者公网 IP 会发送到 AbuseIPDB、IP2Location、ipdata 进行安全信息查询。"
       : `当前缺少 ${missing.join(", ")}，未配置的检测项将仅显示访问者 IP。`,
     checked_at: new Date().toISOString(),
-    visitor_network: normalizeVisitorNetwork(request),
     debug_enabled: debugEnabled,
-  });
+  };
+
+  await setCachedResult(env, ip, result);
+
+  return jsonResponse({ ...result, visitor_network: normalizeVisitorNetwork(request) });
 }
