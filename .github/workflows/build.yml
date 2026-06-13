@@ -1,17 +1,9 @@
-name: Build WeChat Archive Site
+name: Refresh archive cache (manual)
 
 on:
-  push:
-    branches:
-      - main
-    paths:
-      - "scripts/**"
-      - "data/**"
-      - "requirements.txt"
-      - "urls.txt"
-      - "public/_headers"
-      - "public/submit.html"
-      - ".github/workflows/build.yml"
+  # Auto-build is disabled: Cloudflare Pages is the sole builder and deploys
+  # on every push. This workflow is kept manual-only to regenerate and commit
+  # the article cache (data/articles-cache.json) when it needs refreshing.
   workflow_dispatch:
 
 permissions:
@@ -37,10 +29,6 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Build static site
-        env:
-          # Set the repository variable SITE_BASE_URL (e.g. https://maobidao.com)
-          # to emit absolute canonical/OG/JSON-LD URLs. Leave unset to degrade gracefully.
-          SITE_BASE_URL: ${{ vars.SITE_BASE_URL }}
         run: python scripts/wechat_to_site.py
 
       - name: Commit generated files
