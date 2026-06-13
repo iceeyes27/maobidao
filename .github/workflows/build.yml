@@ -37,6 +37,10 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Build static site
+        env:
+          # Set the repository variable SITE_BASE_URL (e.g. https://maobidao.com)
+          # to emit absolute canonical/OG/JSON-LD URLs. Leave unset to degrade gracefully.
+          SITE_BASE_URL: ${{ vars.SITE_BASE_URL }}
         run: python scripts/wechat_to_site.py
 
       - name: Commit generated files

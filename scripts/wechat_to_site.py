@@ -32,6 +32,10 @@ ARTICLES_CACHE_JSON = ROOT / "data" / "articles-cache.json"
 
 WECHAT_PREFIX = "https://mp.weixin.qq.com/"
 REFETCH_ALL = os.environ.get("REFETCH_ALL", "").strip().lower() in {"1", "true", "yes"}
+# Absolute site origin (e.g. https://maobidao.com) used for canonical/OG/JSON-LD URLs.
+# When unset, pages still emit titles, descriptions and structured data, just without absolute URLs.
+SITE_BASE_URL = os.environ.get("SITE_BASE_URL", "").strip().rstrip("/")
+SITE_NAME = "公开文章归档"
 USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -155,11 +159,57 @@ def parse_publish_time(page: str) -> str:
         return ""
 
 
-def parse_article_time(value: str) -> datetime:
+def parse_any_datetime(value: str) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
     try:
-        return datetime.strptime(value, "%Y-%m-%d %H:%M:%S")
-    except (TypeError, ValueError):
+        return datetime.strptime(text, "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        pass
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def parse_article_time(value: str) -> datetime:
+    dt = parse_any_datetime(value)
+    if dt is None:
         return datetime.min
+    # Normalize to naive UTC so ISO-with-offset and plain values sort together.
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+    return dt
+
+
+def format_display_time(value: str) -> str:
+    dt = parse_any_datetime(value)
+    if dt is None:
+        return str(value or "").strip()
+    return dt.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def format_iso_time(value: str) -> str:
+    dt = parse_any_datetime(value)
+    return dt.isoformat() if dt is not None else ""
+
+
+def absolute_url(path: str) -> str:
+    if not SITE_BASE_URL or not path:
+        return ""
+    if path.startswith("http://") or path.startswith("https://"):
+        return path
+    return f"{SITE_BASE_URL}/{path.lstrip('/')}"
+
+
+def json_ld_script(data: Any) -> str:
+    if not data:
+        return ""
+    payload = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
+    # Prevent premature </script> termination from any embedded markup.
+    payload = payload.replace("<", "\\u003c")
+    return f'\n  <script type="application/ld+json">{payload}</script>'
 
 
 def sort_articles_by_publish_time(articles: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1352,9 +1402,39 @@ def write_article_page(article: dict[str, Any]) -> None:
             body,
             article_stats_script(article["id"]),
             description=f"{article.get('title') or '文章详情'} 的归档页，保留原文来源与抓取信息。",
+            canonical_path=article_detail_path(article),
+            og_type="article",
+            structured_data=build_article_structured_data(article) if article.get("success") else None,
         ),
         encoding="utf-8",
     )
+
+
+def build_article_structured_data(article: dict[str, Any]) -> dict[str, Any]:
+    host = article.get("source_host") or source_host(article.get("url", ""))
+    is_wechat = article.get("source_name") == "微信公众号" or host == "mp.weixin.qq.com"
+    data: dict[str, Any] = {
+        "@context": "https://schema.org",
+        "@type": "Article",
+        "headline": article.get("title") or "文章详情",
+    }
+
+    published_iso = format_iso_time(article.get("publish_time", ""))
+    if published_iso:
+        data["datePublished"] = published_iso
+
+    if article.get("account_name"):
+        data["author"] = {
+            "@type": "Organization" if is_wechat else "Person",
+            "name": article["account_name"],
+        }
+
+    article_url = absolute_url(article_detail_path(article))
+    if article_url:
+        data["url"] = article_url
+        data["mainEntityOfPage"] = article_url
+
+    return data
 
 
 
@@ -1457,6 +1537,7 @@ def write_submit_page() -> None:
         body,
         script,
         description="用于维护公开文章归档链接库，支持批量提交公开网页与微信公众号文章链接。",
+        canonical_path="/submit",
     )
     (PUBLIC / "submit.html").write_text(html_text, encoding="utf-8")
 
@@ -1474,19 +1555,48 @@ def write_articles_cache(articles: list[dict[str, Any]]) -> None:
     )
 
 
-def page_shell(title: str, body: str, extra_scripts: str = "", description: str = "") -> str:
+def page_shell(
+    title: str,
+    body: str,
+    extra_scripts: str = "",
+    description: str = "",
+    *,
+    canonical_path: str = "",
+    og_type: str = "website",
+    structured_data: Any = None,
+) -> str:
     meta_description = (
         f'\n  <meta name="description" content="{html.escape(description, quote=True)}">'
         if description
         else ""
     )
+
+    head_tags = [
+        f'<meta property="og:type" content="{html.escape(og_type, quote=True)}">',
+        f'<meta property="og:site_name" content="{html.escape(SITE_NAME, quote=True)}">',
+        f'<meta property="og:title" content="{html.escape(title, quote=True)}">',
+    ]
+    if description:
+        head_tags.append(
+            f'<meta property="og:description" content="{html.escape(description, quote=True)}">'
+        )
+
+    canonical_url = absolute_url(canonical_path)
+    if canonical_url:
+        head_tags.insert(0, f'<link rel="canonical" href="{html.escape(canonical_url, quote=True)}">')
+        head_tags.append(f'<meta property="og:url" content="{html.escape(canonical_url, quote=True)}">')
+
+    head_tags.append('<meta name="twitter:card" content="summary">')
+    head_block = "\n  " + "\n  ".join(head_tags)
+    jsonld_block = json_ld_script(structured_data)
+
     return f"""<!doctype html>
 <html lang=\"zh-CN\">
 <head>
   <meta charset=\"utf-8\">
   <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">{meta_description}
-  <title>{html.escape(title)}</title>
-  <link rel=\"stylesheet\" href=\"/assets/style.css\">
+  <title>{html.escape(title)}</title>{head_block}
+  <link rel=\"stylesheet\" href=\"/assets/style.css\">{jsonld_block}
 </head>
 <body>
   <main class=\"site\">
@@ -1503,6 +1613,16 @@ def article_detail_path(article: dict[str, Any]) -> str:
     article_slug = Path(filename).stem if filename else article.get("id") or ""
     return f"/articles/{html.escape(article_slug)}"
 
+
+
+def meta_time_item(label: str, value: str) -> str:
+    display = format_display_time(value)
+    iso = format_iso_time(value)
+    time_attr = f' datetime="{html.escape(iso, quote=True)}"' if iso else ""
+    return (
+        f'<span class="meta-item"><span class="meta-key">{label}</span>'
+        f'<time class="meta-value"{time_attr}>{html.escape(display)}</time></span>'
+    )
 
 
 def article_meta(article: dict[str, Any]) -> str:
@@ -1523,13 +1643,9 @@ def article_meta(article: dict[str, Any]) -> str:
             f'<span class="meta-item"><span class="meta-key">来源</span><span class="meta-value">{html.escape(host)}</span></span>'
         )
     if article.get("publish_time"):
-        items.append(
-            f'<span class="meta-item"><span class="meta-key">发布时间</span><span class="meta-value">{html.escape(article["publish_time"])}</span></span>'
-        )
+        items.append(meta_time_item("发布时间", article["publish_time"]))
     if article.get("fetched_at"):
-        items.append(
-            f'<span class="meta-item"><span class="meta-key">抓取时间</span><span class="meta-value">{html.escape(article["fetched_at"])}</span></span>'
-        )
+        items.append(meta_time_item("抓取时间", article["fetched_at"]))
     if not article.get("success"):
         items.append(
             '<span class="meta-item"><span class="meta-key">状态</span><span class="meta-value">抓取失败</span></span>'
@@ -2339,6 +2455,7 @@ def write_visitor_ip_page() -> None:
         body,
         visitor_ip_script(),
         description="手动检测当前访问者公网 IP，查看位置、运营商、ASN、家宽判断，以及代理、Tor、数据中心等风险标记。",
+        canonical_path="/visitor-ip",
     )
     (PUBLIC / "visitor-ip.html").write_text(html_text, encoding="utf-8")
 
@@ -2358,7 +2475,7 @@ def write_index(articles: list[dict[str, Any]]) -> None:
         items.append(
             f"""      <li class="article-item">
         <div class="article-title-row">
-          <h2><a href="{detail_href}">{title}</a></h2>
+          <h3><a href="{detail_href}">{title}</a></h3>
           <span class="source-badge">{source_label}</span>
         </div>
         {meta_block}
@@ -2408,9 +2525,41 @@ def write_index(articles: list[dict[str, Any]]) -> None:
             body,
             site_stats_script(),
             description="手动收录公开文章链接，优先适配微信公众号文章，提供稳定的归档阅读页与原文入口。",
+            canonical_path="/",
+            structured_data=build_index_structured_data(successful_articles),
         ),
         encoding="utf-8",
     )
+
+
+def build_index_structured_data(successful_articles: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    website: dict[str, Any] = {
+        "@context": "https://schema.org",
+        "@type": "WebSite",
+        "name": SITE_NAME,
+    }
+    home_url = absolute_url("/")
+    if home_url:
+        website["url"] = home_url
+
+    list_items = []
+    for index, article in enumerate(successful_articles, start=1):
+        entry: dict[str, Any] = {
+            "@type": "ListItem",
+            "position": index,
+            "name": article.get("title") or "未命名文章",
+        }
+        item_url = absolute_url(article_detail_path(article))
+        if item_url:
+            entry["url"] = item_url
+        list_items.append(entry)
+
+    item_list = {
+        "@context": "https://schema.org",
+        "@type": "ItemList",
+        "itemListElement": list_items,
+    }
+    return [website, item_list]
 
 
 def cleanup_unused_image_dirs(articles: list[dict[str, Any]]) -> None:
