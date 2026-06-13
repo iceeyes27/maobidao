@@ -1,5 +1,6 @@
 const VISITOR_COOKIE_NAME = "maobidao_vid";
 const VISITOR_COOKIE_MAX_AGE = 60 * 60 * 24 * 400;
+const DAILY_VISITOR_TTL_SECONDS = 60 * 60 * 24 * 3;
 const UV_TIMEZONE = "Asia/Shanghai";
 const ARTICLE_ID_RE = /^[a-f0-9]{32}$/i;
 const BOT_USER_AGENT_RE = /bot|crawler|spider|slurp|bingpreview|facebookexternalhit|python-requests|curl\b|wget\b|go-http-client|HeadlessChrome/i;
@@ -21,30 +22,7 @@ function methodNotAllowed() {
 }
 
 function missingEnvKeys(env) {
-  return ["STATS_COUNTER"].filter((key) => !env[key]);
-}
-
-function counterStub(env) {
-  const id = env.STATS_COUNTER.idFromName("global");
-  return env.STATS_COUNTER.get(id);
-}
-
-async function recordVisit(env, page, articleId, visitorId, day) {
-  const stub = counterStub(env);
-  const response = await stub.fetch("https://do/record", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ page, articleId, visitorId, day }),
-  });
-  return response.json();
-}
-
-async function readSnapshot(env, page, articleId, day) {
-  const stub = counterStub(env);
-  const params = new URLSearchParams({ page, day });
-  if (articleId) params.set("articleId", articleId);
-  const response = await stub.fetch(`https://do/snapshot?${params}`);
-  return response.json();
+  return ["STATS_KV"].filter((key) => !env[key]);
 }
 
 function parseCookies(cookieHeader) {
@@ -100,6 +78,45 @@ function chinaDateString(now = new Date()) {
   return formatter.format(now);
 }
 
+function sitePvKey() {
+  return "stats:site:pv";
+}
+
+function siteUvKey(day) {
+  return `stats:site:uv:${day}`;
+}
+
+function articlePvKey(articleId) {
+  return `stats:article:${articleId}:pv`;
+}
+
+function dailyVisitorKey(day, visitorId) {
+  return `stats:visitor:${day}:${visitorId}`;
+}
+
+async function readCounter(kv, key) {
+  const value = await kv.get(key);
+  const number = Number.parseInt(String(value || "0"), 10);
+  return Number.isFinite(number) && number >= 0 ? number : 0;
+}
+
+async function incrementCounter(kv, key) {
+  const current = await readCounter(kv, key);
+  const next = current + 1;
+  await kv.put(key, String(next));
+  return next;
+}
+
+async function markDailyVisitor(kv, day, visitorId) {
+  const key = dailyVisitorKey(day, visitorId);
+  const exists = await kv.get(key);
+  if (exists) {
+    return false;
+  }
+  await kv.put(key, "1", { expirationTtl: DAILY_VISITOR_TTL_SECONDS });
+  return true;
+}
+
 async function readPayload(request) {
   try {
     return await request.json();
@@ -132,6 +149,14 @@ function ignoredReason(request) {
   return "";
 }
 
+async function readStatsSnapshot(kv, page, articleId, day) {
+  return {
+    site_pv: await readCounter(kv, sitePvKey()),
+    site_uv: await readCounter(kv, siteUvKey(day)),
+    article_pv: page === "article" ? await readCounter(kv, articlePvKey(articleId)) : null,
+  };
+}
+
 function successMessage(page, counted, reason, day) {
   if (!counted && reason === "prefetch") {
     return `已返回统计数据，本次预取请求不计入统计。今日 UV 按 ${UV_TIMEZONE} 日期 ${day} 去重。`;
@@ -157,9 +182,9 @@ export async function onRequest({ request, env }) {
     return jsonResponse({
       success: missing.length === 0,
       message: missing.length === 0
-        ? "Stats API 已部署，Durable Object 绑定已配置。"
+        ? "Stats API 已部署，KV 绑定已配置。"
         : `Stats API 已部署，但缺少环境绑定：${missing.join(", ")}`,
-      do_configured: missing.length === 0,
+      kv_configured: missing.length === 0,
       cookie_name: VISITOR_COOKIE_NAME,
       uv_scope: "daily",
       uv_timezone: UV_TIMEZONE,
@@ -206,13 +231,18 @@ export async function onRequest({ request, env }) {
     let snapshot;
 
     if (reason) {
-      snapshot = await readSnapshot(env, page, articleId, day);
+      snapshot = await readStatsSnapshot(env.STATS_KV, page, articleId, day);
     } else {
-      const result = await recordVisit(env, page, articleId, visitorId, day);
+      const sitePv = await incrementCounter(env.STATS_KV, sitePvKey());
+      const isNewDailyVisitor = await markDailyVisitor(env.STATS_KV, day, visitorId);
+      const siteUv = isNewDailyVisitor
+        ? await incrementCounter(env.STATS_KV, siteUvKey(day))
+        : await readCounter(env.STATS_KV, siteUvKey(day));
+      const articlePv = articleId ? await incrementCounter(env.STATS_KV, articlePvKey(articleId)) : null;
       snapshot = {
-        site_pv: result.sitePv,
-        site_uv: result.siteUv,
-        article_pv: result.articlePv,
+        site_pv: sitePv,
+        site_uv: siteUv,
+        article_pv: articlePv,
       };
     }
 

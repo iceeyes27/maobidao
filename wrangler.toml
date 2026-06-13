@@ -16,14 +16,6 @@ binding = "STATS_KV"
 id = "c25b289b65284d0c8e7ba329dc0a4c12"
 preview_id = "c25b289b65284d0c8e7ba329dc0a4c12"
 
-[[durable_objects.bindings]]
-name = "STATS_COUNTER"
-class_name = "StatsCounter"
-
-[[migrations]]
-tag = "v1"
-new_classes = ["StatsCounter"]
-
 [assets]
 directory = "./public"
 binding = "ASSETS"
