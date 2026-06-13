@@ -271,12 +271,12 @@ STATS_KV (Cloudflare KV binding)
 - `GITHUB_REPO`：GitHub 仓库名。
 - `GITHUB_BRANCH`：通常是 `main`，未设置时默认使用 `main`。
 - `SUBMIT_PASSWORD`：提交页面管理密码。
-- `STATS_KV`：Cloudflare KV 绑定，用于保存站点 PV、按日 UV 和文章阅读量。
+- `STATS_KV`：Cloudflare KV 绑定，**由统计和访客 IP 检测共用**——保存站点 PV、按日 UV 和文章阅读量，同时缓存访客 IP 的第三方检测结果（默认 1 小时）。`/api/stats` 强依赖此绑定，未绑定时统计接口会返回"配置不完整"；`/api/visitor-ip-check` 不强依赖，缺少时仍可检测，只是每次都实时查询、不走缓存。建议在 Pages 项目里绑定。
 - `ABUSEIPDB_API_KEY`：AbuseIPDB 官方 API key。
 - `IP2LOCATION_API_KEY`：IP2Location 官方 API key。
 - `IPDATA_API_KEY`：ipdata 官方 API key。
 
-`GITHUB_TOKEN`、统计用的 `STATS_KV` 绑定和三方 IP 查询 key 都只在后端运行时使用，不会出现在前端源码中。
+`GITHUB_TOKEN`、统计与 IP 缓存共用的 `STATS_KV` 绑定和三方 IP 查询 key 都只在后端运行时使用，不会出现在前端源码中。
 
 如果项目使用 Workers Static Assets，`GITHUB_OWNER`、`GITHUB_REPO`、`GITHUB_BRANCH` 已写入 `wrangler.toml`。你至少需要在 Cloudflare Worker 的 Variables and Secrets 中添加 2 个必需 secret：`GITHUB_TOKEN`、`SUBMIT_PASSWORD`。如果你还想启用站内浏览量统计，请额外绑定一个名为 `STATS_KV` 的 Cloudflare KV namespace。如果你还想启用访客 IP 检测，再按需补充 3 个可选 secret：`ABUSEIPDB_API_KEY`、`IP2LOCATION_API_KEY`、`IPDATA_API_KEY`。
 
