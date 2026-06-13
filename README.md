@@ -1,6 +1,6 @@
 # 文章链接归档网站
 
-这是一个部署在 Cloudflare Pages 上的静态归档网站，用于保存用户手动提交的公开文章链接，并通过 GitHub Actions 生成静态网页。
+这是一个部署在 Cloudflare Pages 上的静态归档网站，用于保存用户手动提交的公开文章链接。静态页面由 Cloudflare Pages 在每次部署时运行 `scripts/wechat_to_site.py` 生成。
 
 ## 功能边界
 
@@ -178,13 +178,31 @@ python scripts/wechat_to_site.py
 
 ## Cloudflare Pages 部署
 
-Cloudflare Pages 推荐设置：
+Cloudflare Pages 是本项目的**唯一构建器**：每次向仓库 push 时，它会拉取代码、运行 `scripts/wechat_to_site.py` 生成静态页面，再发布 `public/` 目录。
+
+推荐设置：
 
 ```text
-Framework preset: None
-Build command: 留空或不使用
-Build output directory: public
+Framework preset:        None
+Build command:           pip install -r requirements.txt && python scripts/wechat_to_site.py
+Build output directory:  public
 ```
+
+构建期环境变量（Production 与 Preview 都要配）：
+
+```text
+SITE_BASE_URL    站点的绝对地址，例如 https://maobidao.com
+PYTHON_VERSION   3.11
+```
+
+- `SITE_BASE_URL`：用于生成页面的 `canonical`、Open Graph `og:url` 与 JSON-LD 结构化数据里的绝对链接。**不配置时页面仍可正常工作**，只是省略这些绝对 URL（优雅降级）。
+- `PYTHON_VERSION`：Cloudflare Pages 据此安装对应 Python，再由 `pip install -r requirements.txt` 装好构建依赖。
+
+### GitHub Actions 的角色
+
+`.github/workflows/build.yml` 已改为**仅手动触发**（`workflow_dispatch`），不再随 push 自动构建，以避免与 Cloudflare Pages 双重构建。它的用途收窄为：在需要时重新生成并提交文章抓取缓存 `data/articles-cache.json` 回仓库。
+
+由于线上构建在 Cloudflare Pages 进行、缓存不会被自动持久化，新提交的文章会在每次 Cloudflare 构建时被重新抓取一次。如果文章变多导致构建变慢或触发来源站反爬，可手动运行该 workflow 刷新缓存。
 
 保留 `functions/api/submit.js`、`functions/api/visitor-ip-check.js` 和 `functions/api/stats.js`，Cloudflare Pages 会将其作为 Pages Function 暴露为：
 
