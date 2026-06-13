@@ -5,6 +5,11 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="description" content="手动检测当前访问者公网 IP，查看位置、运营商、ASN、家宽判断，以及代理、Tor、数据中心等风险标记。">
   <title>我的 IP 是什么？访问 IP 风险 / 家宽 / 代理检测</title>
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="公开文章归档">
+  <meta property="og:title" content="我的 IP 是什么？访问 IP 风险 / 家宽 / 代理检测">
+  <meta property="og:description" content="手动检测当前访问者公网 IP，查看位置、运营商、ASN、家宽判断，以及代理、Tor、数据中心等风险标记。">
+  <meta name="twitter:card" content="summary">
   <link rel="stylesheet" href="/assets/style.css">
 </head>
 <body>
@@ -406,7 +411,7 @@
           visitorIpElements.riskTags.innerHTML = '<span class="visitor-ip-tag empty">未发现明显风险标记</span>';
           return;
         }
-        visitorIpElements.riskTags.innerHTML = tags.map((tag) => `<span class="visitor-ip-tag">${escapeHtml(tag)}</span>`).join("");
+        visitorIpElements.riskTags.innerHTML = tags.map((tag) => `<span class="visitor-ip-tag">${tag}</span>`).join("");
       }
 
       function pickPrimaryNetworkType(checks) {
@@ -572,15 +577,7 @@
           };
           const offer = await connection.createOffer();
           await connection.setLocalDescription(offer);
-          await new Promise((resolve) => {
-            const fallback = setTimeout(resolve, 3000);
-            connection.onicegatheringstatechange = () => {
-              if (connection.iceGatheringState === "complete") {
-                clearTimeout(fallback);
-                resolve();
-              }
-            };
-          });
+          await new Promise((resolve) => setTimeout(resolve, 1200));
         } catch (error) {
           visitorIpElements.webrtcStatus.textContent = "检测失败";
           visitorIpElements.webrtcStatus.className = "visitor-ip-provider-state error";
@@ -626,11 +623,19 @@
 
       function extractWebRtcAddress(candidate) {
         const parts = String(candidate || "").split(/\s+/);
+        const hostIndex = parts.findIndex((part) => part === "typ");
         const address = parts[4] || "";
         if (address && (address.includes(".") || address.includes(":"))) {
           return address;
         }
-        return parts.find((part) => part.endsWith(".local")) || "";
+        const local = parts.find((part) => part.endsWith(".local"));
+        if (local) {
+          return local;
+        }
+        if (hostIndex > 0 && parts[hostIndex - 1]) {
+          return parts[hostIndex - 1];
+        }
+        return "";
       }
 
       function isPrivateCandidateAddress(address) {
