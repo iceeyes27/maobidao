@@ -7,7 +7,24 @@ const STOPPED = new Set(['completed', 'partial_failed', 'failed', 'cancelled', '
 const SNAPSHOT_KEY = /^private\/rss\/articles\/[a-f0-9]{64}\.json$/;
 
 export const RSS_FAKEID = `rss:${rssSource.RSS_ACCOUNT_BIZ}`;
+export const RSS_POLL_SLOT_MS = 6 * 3_600_000;
 export function isRssSource(source) { return source?.fakeid === RSS_FAKEID; }
+
+/**
+ * Claims the feed read for the tick's six-hour UTC slot (Beijing 02:00, 08:00,
+ * 14:00, 20:00). The caller releases the claim when the read did not complete,
+ * so the next five-minute tick retries within the same slot.
+ */
+export async function claimRssPoll(env, store, tick) {
+  if (env.ARCHIVE_AUTO_ENABLED !== 'true') return null;
+  if (!(await store.listSources()).some(source => source.enabled && isRssSource(source))) return null;
+  if (!Number.isSafeInteger(tick) || tick < 0) throw invalid('RSS 检查时间无效。');
+  const now = Date.now();
+  await store.statement(`DELETE FROM archive_leases WHERE resource LIKE 'rss-poll:%' AND expires_at<=?`, [now]).run();
+  const slot = Math.floor(tick / RSS_POLL_SLOT_MS) * RSS_POLL_SLOT_MS;
+  // Hold the claim past the slot's end; later slots use their own resource.
+  return store.acquireLease(`rss-poll:${slot}`, `tick:${tick}`, Math.max(slot + RSS_POLL_SLOT_MS - now, 0) + RSS_POLL_SLOT_MS);
+}
 
 function invalid(message) {
   const error = new Error(message);

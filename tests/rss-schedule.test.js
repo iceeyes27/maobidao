@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 import { test } from 'node:test';
 import { automaticWindow, sourceArticleKey } from '../src/archive/core.js';
-import { RSS_FAKEID, dispatchRssSources, isRssSource } from '../src/archive/rss-schedule.js';
+import { RSS_FAKEID, RSS_POLL_SLOT_MS, claimRssPoll, dispatchRssSources, isRssSource } from '../src/archive/rss-schedule.js';
 import { RSS_ACCOUNT_BIZ } from '../src/archive/rss-source.js';
 import { ArchiveStore } from '../src/archive/store.js';
 
@@ -337,4 +337,25 @@ test('ambiguous workflow dispatch retains its outbox and reuses the fixed task o
   await poll([entry(1)], { tick: TICK + 300_000 });
   assert.equal((await store.listJobs()).length, 1);
   assert.equal((await store.getDaily(job.source_id, job.monitor_date)).job_id, job.id);
+});
+
+test('the feed is claimed once per six-hour slot and a released claim retries in the same slot', async t => {
+  const { store, source, env } = await setup(t);
+  const first = await claimRssPoll(env, store, TICK);
+  assert.ok(first);
+  assert.equal(await claimRssPoll(env, store, TICK + 300_000), null);
+  await store.releaseLease(first);
+  assert.ok(await claimRssPoll(env, store, TICK + 300_000));
+  assert.equal(await claimRssPoll(env, store, TICK + 600_000), null);
+  const slotEnd = Math.floor(TICK / RSS_POLL_SLOT_MS) * RSS_POLL_SLOT_MS + RSS_POLL_SLOT_MS;
+  assert.ok(await claimRssPoll(env, store, slotEnd));
+
+  await store.updateSource(source.id, { enabled: false });
+  assert.equal(await claimRssPoll(env, store, slotEnd + RSS_POLL_SLOT_MS), null);
+  await store.updateSource(source.id, { enabled: true });
+  env.ARCHIVE_AUTO_ENABLED = 'false';
+  assert.equal(await claimRssPoll(env, store, slotEnd + RSS_POLL_SLOT_MS), null);
+  env.ARCHIVE_AUTO_ENABLED = 'true';
+  await assert.rejects(claimRssPoll(env, store, NaN), /检查时间无效/);
+  assert.ok(await claimRssPoll(env, store, slotEnd + RSS_POLL_SLOT_MS));
 });

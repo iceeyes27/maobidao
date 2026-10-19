@@ -346,7 +346,7 @@ test("admin RSS source describes delayed automatic capture without requiring WeC
   assert.match(sourceText, /2026\/09\/28 22:24 至 2026\/10\/18 22:37/);
   assert.match(admin.get("service-status").textContent, /无需微信扫码/);
   assert.doesNotMatch(admin.get("service-status").textContent, /请先完成微信登录/);
-  assert.match(admin.get("automatic-summary").textContent, /全天每 5 分钟/);
+  assert.match(admin.get("automatic-summary").textContent, /每 6 小时检查一次公开订阅源/);
   assert.match(admin.get("automatic-summary").textContent, /每个原文日期一篇/);
   assert.match(admin.get("automatic-baseline-help").textContent, /次日收录/);
   assert.ok(admin.requests.every(request => !request.path.startsWith("/api/admin/wechat/login")));

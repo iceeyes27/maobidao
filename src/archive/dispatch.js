@@ -1,6 +1,6 @@
 import { ArchiveStore } from "./store.js";
 import { automaticWindow } from "./core.js";
-import { dispatchRssSources, isRssSource } from "./rss-schedule.js";
+import { claimRssPoll, dispatchRssSources, isRssSource } from "./rss-schedule.js";
 
 const TERMINAL = new Set(["completed", "cancelled", "partial_failed", "failed"]);
 
@@ -106,8 +106,19 @@ export async function scheduledArchive(controller, env) {
   }
   const tick = Number(controller.scheduledTime || Date.now());
   const window = { ...automaticWindow(tick), tick };
-  try { await dispatchRssSources({ env, store, tick, dispatchJob }); }
-  catch (error) { await dispatchPending(env); throw error; }
+  // The feed is read once per six-hour slot; dispatchPending still retries
+  // selected RSS articles every tick.
+  let rssPoll = null;
+  try {
+    rssPoll = await claimRssPoll(env, store, tick);
+    if (rssPoll && !(await dispatchRssSources({ env, store, tick, dispatchJob })).sources) {
+      await store.releaseLease(rssPoll);
+    }
+  } catch (error) {
+    if (rssPoll) await store.releaseLease(rssPoll).catch(() => {});
+    await dispatchPending(env);
+    throw error;
+  }
   if (env.ARCHIVE_AUTO_ENABLED === "true" && window.active) {
     const sourceLease = await store.acquireLease("source-config", `schedule:${tick}`, 30_000);
     let sources = [];

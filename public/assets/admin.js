@@ -321,7 +321,7 @@
   function renderAutomaticRules() {
     const source = automaticSource();
     if (isRss(source)) {
-      $("automatic-summary").textContent = "全天每 5 分钟检查公开订阅源，自动保存原文在北京时间 21:30—23:30 发布的文章，每个原文日期一篇。正文和图片完整保存后更新网站。";
+      $("automatic-summary").textContent = "每 6 小时检查一次公开订阅源（北京时间约 2:00、8:00、14:00、20:00），自动保存原文在北京时间 21:30—23:30 发布的文章，每个原文日期一篇。正文和图片完整保存后更新网站。";
       $("automatic-baseline-help").textContent = "首次另行保存公开源当前最近 20 篇。公开源更新可能延迟 0—24 小时，因此文章可能在次日收录，无法保证当晚完成。";
     } else {
       $("automatic-summary").textContent = "每天北京时间 21:30—23:30，每 5 分钟检查一次，每晚自动获取一篇该时段发布的新文章，完整获取后更新网站。";

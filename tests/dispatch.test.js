@@ -7,7 +7,7 @@ import { dispatchJob, dispatchPending, scheduledArchive, signalWaitingJobs } fro
 import { automaticWindow } from '../src/archive/core.js';
 import { runArchiveBatch } from '../src/archive/runner.js';
 import { CollectorError } from '../src/archive/collector-security.js';
-import { RSS_FAKEID } from '../src/archive/rss-schedule.js';
+import { RSS_FAKEID, claimRssPoll } from '../src/archive/rss-schedule.js';
 import { RSS_FEED_URL } from '../src/archive/rss-source.js';
 
 class D1Adapter {
@@ -321,6 +321,8 @@ test('RSS fetch failure still dispatches an already captured publication and pro
   } };
   await assert.rejects(scheduledArchive({ scheduledTime: clock }, env), error => error === upstreamError);
   assert.equal(feeds, 1);
+  // A failed read frees the six-hour slot so the next tick retries the feed.
+  assert.ok(await claimRssPoll(env, store, clock + 300_000));
   assert.deepEqual(created, [{ id: job.workflow_id, params: { job_id: job.id } }]);
   assert.equal((await store.listPendingDispatch()).length, 0);
   assert.equal((await store.getArticle(article.id)).status, 'ready');
