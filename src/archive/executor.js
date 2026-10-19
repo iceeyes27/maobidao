@@ -1,7 +1,8 @@
 import { DurableObject } from 'cloudflare:workers';
 import * as collector from './collector.js';
 import { validatePublicUrl } from './collector-security.js';
-import { dispatchPending, scheduledArchive } from './dispatch.js';
+import { dispatchJob, dispatchPending, scheduledArchive } from './dispatch.js';
+import { bootstrapRss } from './rss-bootstrap.js';
 import { runArchiveBatch } from './runner.js';
 import { fetchImageResource } from './resources.js';
 
@@ -107,6 +108,11 @@ export class ArchiveExecutor extends DurableObject {
     if (!Number.isSafeInteger(tick) || tick < 0) throw invalid('调度时间无效。');
     this.#bindScope('account');
     return scheduledArchive({ scheduledTime: tick }, this.env);
+  }
+
+  async bootstrapRss() {
+    this.#bindScope('account');
+    return bootstrapRss(this.env, { dispatchJob });
   }
 
   async runPending() {

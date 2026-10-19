@@ -153,15 +153,26 @@
     return `${value("year")}-${value("month")}-${value("day")}`;
   }
 
-  function formatDate(value) {
-    if (!value) return "";
+  function dateValue(value) {
+    if (!value) return null;
     let normalized = value;
     if (typeof value === "number") normalized = value < 1e12 ? value * 1000 : value;
     else if (/^\d{10,13}$/.test(String(value))) normalized = Number(value) * (String(value).length <= 10 ? 1000 : 1);
     else if (/^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(?::\d{2})?$/.test(value)) normalized = `${value.replace(" ", "T")}Z`;
     const date = new Date(normalized);
-    if (!Number.isFinite(date.getTime())) return "";
-    return new Intl.DateTimeFormat("zh-CN", { timeZone: "Asia/Shanghai", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).format(date);
+    return Number.isFinite(date.getTime()) ? date : null;
+  }
+
+  function formatDate(value) {
+    const date = dateValue(value);
+    return date ? new Intl.DateTimeFormat("zh-CN", { timeZone: "Asia/Shanghai", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).format(date) : "";
+  }
+
+  function calendarDate(value) {
+    const date = dateValue(value);
+    if (!date) return "";
+    const parts = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Shanghai", year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(date);
+    return ["year", "month", "day"].map(type => parts.find(part => part.type === type).value).join("-");
   }
 
   function validDate(value) {
@@ -189,39 +200,90 @@
     $("scheduler-status").textContent = text;
   }
 
+  const isRss = source => source?.provider === "rss";
+  const sourceEnabled = source => source.enabled === true || source.enabled === 1;
+  const automaticSource = () => state.sources.find(sourceEnabled) || state.sources.find(isRss);
+
+  function coverageRange(value) {
+    const start = formatDate(value?.coverage_start);
+    const end = formatDate(value?.coverage_end);
+    return start && end ? `当前提供范围：${start} 至 ${end}（北京时间）。` : "当前提供范围尚未确认。";
+  }
+
+  function renderHistoryCoverage() {
+    const source = state.sources.find(item => String(item.id) === $("history-source").value);
+    const node = $("history-coverage");
+    if (!isRss(source)) { node.textContent = ""; return; }
+    const first = calendarDate(source.coverage_start);
+    const last = calendarDate(source.coverage_end);
+    const start = $("start-date").value;
+    const end = $("end-date").value;
+    const outside = first && last && ((validDate(start) && start < first) || (validDate(end) && end > last));
+    node.textContent = `公开订阅源仅提供当前最近 20 篇。${coverageRange(source)}${outside
+      ? "所选日期超出此范围，范围外文章无法获取；任务仅保存可获取部分。"
+      : "公开源未收录的文章无法补齐，任务仅保存可获取部分。"}`;
+  }
+
+  function renderAutomaticRules() {
+    const source = automaticSource();
+    if (isRss(source)) {
+      $("automatic-summary").textContent = "全天每 5 分钟检查公开订阅源，自动保存原文在北京时间 21:30—23:30 发布的文章，每个原文日期一篇。正文和图片完整保存后更新网站。";
+      $("automatic-baseline-help").textContent = "首次另行保存公开源当前最近 20 篇。公开源更新可能延迟 0—24 小时，因此文章可能在次日收录，无法保证当晚完成。";
+    } else {
+      $("automatic-summary").textContent = "每天北京时间 21:30—23:30，每 5 分钟检查一次，每晚自动获取一篇该时段发布的新文章，完整获取后更新网站。";
+      $("automatic-baseline-help").textContent = "公众号后台来源首次启用时已有文章不会自动补充。遇到未完成任务，下一晚先继续该篇。";
+    }
+  }
+
   function renderSources() {
     const list = $("sources-list");
     const select = $("history-source");
     const selected = select.value;
     list.replaceChildren();
     select.replaceChildren();
-    select.append(element("option", state.sources.length ? "请选择公众号" : "请先添加公众号"));
+    select.append(element("option", state.sources.length ? "请选择来源" : "请先添加来源"));
     select.firstChild.value = "";
     for (const source of state.sources) {
-      const enabled = source.enabled === true || source.enabled === 1;
+      const enabled = sourceEnabled(source);
       const row = element("li");
       const content = element("div", undefined, "admin-row");
       const copy = element("div", undefined, "item-copy");
       const name = element("strong", source.name || "未命名公众号");
       name.append(element("span", enabled ? "已启用" : "已停用", "admin-state"));
       copy.append(name);
+      copy.append(element("p", isRss(source) ? "公开订阅源 · 无需微信扫码 · 更新可能延迟 0—24 小时" : "公众号后台 · 需要微信登录", "help"));
+      if (isRss(source)) copy.append(element("p", `仅当前最近 20 篇，未收录的文章无法补齐。${coverageRange(source)}`, "help"));
       if (source.last_error) copy.append(element("p", readableError(source.last_error), "result error"));
       content.append(copy, actionButton(enabled ? "停用自动获取" : "启用自动获取", async () => {
         await api(`/api/admin/sources/${encodeURIComponent(source.id)}`, { method: "PATCH", body: JSON.stringify({ enabled: !enabled }) });
-        message("page-message", enabled ? "已停用该公众号的自动获取。" : "已启用该公众号的自动获取。");
+        message("page-message", enabled ? "已停用该来源的自动获取。" : "已启用该来源的自动获取。");
         await refresh();
       }));
       row.append(content);
       list.append(row);
-      const option = element("option", `${source.name || "未命名公众号"}${enabled ? "" : "（自动获取已停用）"}`);
+      const option = element("option", `${source.name || "未命名公众号"}${isRss(source) ? "（公开订阅源）" : ""}${enabled ? "" : "（自动获取已停用）"}`);
       option.value = source.id;
       select.append(option);
     }
-    if (!state.sources.length) list.append(element("li", "尚未添加公众号。", "help"));
+    if (!state.sources.length) list.append(element("li", "尚未添加来源。", "help"));
     if (state.sources.some((source) => String(source.id) === selected)) select.value = selected;
     const historyButton = $("history-form").querySelector("button[type=submit]") || $("history-form").querySelector("button");
     historyButton.requiresSource = true;
     historyButton.disabled = historyButton.busy === true || state.configured === false || !state.sources.length;
+    renderHistoryCoverage();
+    renderAutomaticRules();
+  }
+
+  function limitedCoverage(job) {
+    return job.progress?.coverage_limited === true || job.progress?.coverage_limited === 1;
+  }
+
+  function jobStatus(job) {
+    return limitedCoverage(job) && ["completed", "complete"].includes(job.status) ? "已保存可获取部分" : labels[job.status] || "等待处理";
+  }
+
+  function coverageNotice(job) {
+    return limitedCoverage(job) ? element("p", `本任务仅保存公开源可获取的部分，未收录的文章无法补齐。${coverageRange(job.progress)}`, "help") : null;
   }
 
   function progress(job, counts) {
@@ -243,6 +305,7 @@
   }
 
   function jobActions(job) {
+    if (job.progress?.preparing === true) return ["cancel"];
     if (Array.isArray(job.allowed_actions)) return job.allowed_actions.filter((action) => ["pause", "resume", "cancel", "retry"].includes(action));
     if (["completed", "complete", "cancelled", "canceled", "no_update", "succeeded"].includes(job.status)) return [];
     if (job.status === "paused") return ["resume", "cancel"];
@@ -266,11 +329,13 @@
       const row = element("div", undefined, "admin-row");
       const copy = element("div", undefined, "item-copy");
       copy.append(element("strong", `${kindLabels[job.kind] || "文章任务"}${job.source_name ? ` · ${job.source_name}` : ""}`));
-      copy.append(element("span", labels[job.status] || "等待处理", `admin-state${["failed", "partial_failed"].includes(job.status) ? " error" : ""}`));
+      copy.append(element("span", jobStatus(job), `admin-state${["failed", "partial_failed"].includes(job.status) ? " error" : ""}`));
       const date = formatDate(job.created_at);
       if (date) copy.append(element("p", `${date}（北京时间）`, "help"));
       if (job.start_date && job.end_date) copy.append(element("p", `${job.start_date} 至 ${job.end_date}（含结束日）`, "help"));
       copy.append(progress(job));
+      const coverage = coverageNotice(job);
+      if (coverage) copy.append(coverage);
       const retry = retryNotice(job);
       if (retry) copy.append(retry);
       if (job.last_error || job.error) copy.append(element("p", readableError(job.last_error || job.error), "result error"));
@@ -293,7 +358,9 @@
     if (version !== state.version || id !== state.detailId || offset !== state.detailOffset) return;
     const section = $("job-detail");
     const job = data.job || {};
-    section.replaceChildren(element("h3", "任务详情"), element("p", labels[job.status] || "等待处理"), progress(job, data.counts || job.counts));
+    section.replaceChildren(element("h3", "任务详情"), element("p", jobStatus(job)), progress(job, data.counts || job.counts));
+    const coverage = coverageNotice(job);
+    if (coverage) section.append(coverage);
     const retry = retryNotice(job);
     if (retry) section.append(retry);
     const items = element("ol");
@@ -399,7 +466,9 @@
       $("logout-button").hidden = false;
       state.sources = Array.isArray(data.sources) ? data.sources : [];
       state.jobs = Array.isArray(data.jobs) ? data.jobs : [];
-      const loginText = data.login?.status === "saved" ? "已保存登录状态，采集时验证。" : ["ready", "authenticated", "logged_in"].includes(data.login?.status) ? "微信登录正常。" : "获取公众号文章前，请先完成微信登录。";
+      const activeSource = automaticSource();
+      const loginText = isRss(activeSource) ? "公开订阅源无需微信扫码；更新可能延迟 0—24 小时。"
+        : data.login?.status === "saved" ? "已保存登录状态，采集时验证。" : ["ready", "authenticated", "logged_in"].includes(data.login?.status) ? "微信登录正常。" : "获取公众号后台文章前，请先完成微信登录。";
       let serviceText;
       if (data.configured === false) serviceText = "自动获取暂未准备完成，请完成服务设置后再开始任务。";
       else if (data.cloud_enabled === false) serviceText = `网站更新尚未启用，手动获取可用于验证。${loginText}`;
@@ -481,7 +550,7 @@
     const start_date = $("start-date").value;
     const end_date = $("end-date").value;
     let error = "";
-    if (!source_id) error = "请选择公众号。";
+    if (!source_id) error = "请选择来源。";
     else if (!validDate(start_date)) error = "请选择有效的开始日期。";
     else if (!validDate(end_date)) error = "请选择有效的结束日期。";
     else if (end_date < start_date) error = "结束日期不能早于开始日期。";
@@ -495,11 +564,14 @@
         delete state.submissions.history;
         state.detailId = data.job?.id || data.job_id || null;
         state.detailOffset = 0;
-        message("history-message", "历史获取任务已开始。关闭此页面后任务仍会继续。");
+        const source = state.sources.find(item => String(item.id) === source_id);
+        message("history-message", isRss(source) ? "历史获取任务已开始，仅保存公开源可获取的文章；未收录的文章无法补齐。关闭此页面后任务仍会继续。" : "历史获取任务已开始。关闭此页面后任务仍会继续。");
         await refresh();
       } catch (failure) { message("history-message", failure.message, false); }
     });
   });
+
+  for (const id of ["history-source", "start-date", "end-date"]) $(id).addEventListener("change", renderHistoryCoverage);
 
   $("links-form").addEventListener("submit", async (event) => {
     event.preventDefault();

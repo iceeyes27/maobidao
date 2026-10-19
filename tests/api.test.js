@@ -5,6 +5,7 @@ import { readFileSync } from "node:fs";
 import { handleAdmin, handleArchiveSubmit } from "../src/archive/api.js";
 import { ArchiveStore } from "../src/archive/store.js";
 import { beijingDate, createAdminSession } from "../src/archive/core.js";
+import { RSS_ACCOUNT_BIZ, RSS_FEED_URL, RSS_STATE_KEY } from "../src/archive/rss-source.js";
 
 function fixture() {
   const sql = new DatabaseSync(":memory:");
@@ -54,6 +55,39 @@ test("administrator data requires a valid signed session", async () => {
   assert.equal(status.configured, true);
   assert.equal(status.enabled, false);
   assert.deepEqual(status.jobs, []);
+});
+
+test('RSS admin status exposes source coverage without private snapshot identities', async t => {
+  const { env, store, sql } = fixture();
+  t.after(() => sql.close());
+  await store.initSource({ name: '猫笔刀', fakeid: `rss:${RSS_ACCOUNT_BIZ}` });
+  const state = { kind: 'wechat-rss-source-state', feed_url: RSS_FEED_URL, account_biz: RSS_ACCOUNT_BIZ,
+    coverage_start: 1_792_000_000_000, coverage_end: 1_792_001_000_000, fetched_at: 1_792_002_000_000,
+    snapshot_key: 'private/internal-snapshot', articles: [{ metadata: { private: 'not-for-status' } }] };
+  env.ARCHIVE_BUCKET.get = async key => {
+    assert.equal(key, RSS_STATE_KEY);
+    const body = JSON.stringify(state);
+    return { size: body.length, text: async () => body };
+  };
+  const status = await (await handleAdmin(await adminRequest('/api/admin/status', env), env)).json();
+  assert.equal(status.sources[0].provider, 'rss');
+  assert.equal(status.sources[0].coverage_start, state.coverage_start);
+  assert.equal(status.sources[0].coverage_end, state.coverage_end);
+  assert.equal(status.sources[0].rss_feed_url, RSS_FEED_URL);
+  assert.doesNotMatch(JSON.stringify(status), /internal-snapshot|not-for-status/);
+});
+
+test('RSS admin status retains its provider with unavailable or corrupt coverage', async t => {
+  const { env, store, sql } = fixture();
+  t.after(() => sql.close());
+  await store.initSource({ name: '猫笔刀', fakeid: `rss:${RSS_ACCOUNT_BIZ}` });
+  for (const response of [null, { size: 200_000, text: () => assert.fail('Oversized state must not be allocated') },
+    { size: 10, text: async () => 'invalid' }]) {
+    env.ARCHIVE_BUCKET.get = async () => response;
+    const status = await (await handleAdmin(await adminRequest('/api/admin/status', env), env)).json();
+    assert.equal(status.sources[0].provider, 'rss');
+    assert.equal(status.sources[0].coverage_start, undefined);
+  }
 });
 
 test("pasted-link passwords cannot bypass the shared password attempt limit", async () => {

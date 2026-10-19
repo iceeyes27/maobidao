@@ -102,7 +102,7 @@ test("not-found page has a usable home link", () => {
   assert.equal(escapeHtml('&<>"\''), "&amp;&lt;&gt;&quot;&#39;");
 });
 
-async function adminHarness({ loggedIn = true, configured = true, failHistoryOnce = false, jobs = [], scheduler = null, detailPages = null, sourceNotice = null, fetchOverride = null } = {}) {
+async function adminHarness({ loggedIn = true, configured = true, failHistoryOnce = false, jobs = [], sources = [{ id: "source-1", name: "测试公众号", enabled: true }], scheduler = null, detailPages = null, sourceNotice = null, fetchOverride = null } = {}) {
   class Node {
     constructor() { this.children = []; this.events = {}; this.value = ""; this.hidden = false; this.disabled = false; this.textContent = ""; }
     addEventListener(name, callback) { this.events[name] = callback; }
@@ -120,7 +120,7 @@ async function adminHarness({ loggedIn = true, configured = true, failHistoryOnc
   const timers = new Map();
   const requests = [];
   let timerId = 0;
-  const status = { configured, login: { status: "saved" }, sources: [{ id: "source-1", name: "测试公众号", enabled: true }], jobs, scheduler };
+  const status = { configured, login: { status: "saved" }, sources, jobs, scheduler };
   const fetch = async (path, options = {}) => {
     requests.push({ path, ...options });
     const override = await fetchOverride?.(path, options);
@@ -234,6 +234,85 @@ function findNode(node, text) {
   }
   return null;
 }
+
+const rssSource = { id: "rss-source", name: "猫笔刀", provider: "rss", enabled: true,
+  coverage_start: Date.parse("2026-09-28T22:24:00+08:00"), coverage_end: Date.parse("2026-10-18T22:37:00+08:00") };
+
+test("admin RSS source describes delayed automatic capture without requiring WeChat login", async () => {
+  const admin = await adminHarness({ sources: [rssSource] });
+  const sourceText = nodeText(admin.get("sources-list"));
+  assert.match(sourceText, /公开订阅源 · 无需微信扫码/);
+  assert.match(sourceText, /2026\/09\/28 22:24 至 2026\/10\/18 22:37/);
+  assert.match(admin.get("service-status").textContent, /无需微信扫码/);
+  assert.doesNotMatch(admin.get("service-status").textContent, /请先完成微信登录/);
+  assert.match(admin.get("automatic-summary").textContent, /全天每 5 分钟/);
+  assert.match(admin.get("automatic-summary").textContent, /每个原文日期一篇/);
+  assert.match(admin.get("automatic-baseline-help").textContent, /次日收录/);
+  assert.ok(admin.requests.every(request => !request.path.startsWith("/api/admin/wechat/login")));
+});
+
+test("admin RSS history warns about unavailable dates without changing the requested range", async () => {
+  const admin = await adminHarness({ sources: [rssSource] });
+  admin.get("history-source").value = rssSource.id;
+  admin.get("start-date").value = "2026-01-01";
+  admin.get("end-date").value = "2026-10-19";
+  admin.get("history-source").events.change();
+  assert.match(admin.get("history-coverage").textContent, /所选日期超出此范围/);
+  await admin.submit("history-form");
+  const request = admin.requests.find(item => item.path === "/api/admin/jobs");
+  assert.deepEqual(JSON.parse(request.body), { kind: "history", source_id: rssSource.id, start_date: "2026-01-01", end_date: "2026-10-19" });
+  assert.match(admin.get("history-message").textContent, /未收录的文章无法补齐/);
+});
+
+test("admin retains WeChat window rules when a WeChat source is active", async () => {
+  const admin = await adminHarness({ sources: [{ id: "wechat", name: "公众号", enabled: true, provider: "wechat" }, { ...rssSource, enabled: false }] });
+  assert.match(admin.get("automatic-summary").textContent, /每天北京时间 21:30—23:30/);
+  assert.doesNotMatch(admin.get("automatic-summary").textContent, /全天/);
+  admin.get("history-source").value = rssSource.id;
+  admin.get("history-source").events.change();
+  assert.match(admin.get("history-coverage").textContent, /最近 20 篇/);
+  admin.get("history-source").value = "wechat";
+  admin.get("history-source").events.change();
+  assert.equal(admin.get("history-coverage").textContent, "");
+});
+
+test("admin RSS without known coverage or automatic activation still does not require WeChat login", async () => {
+  const source = { ...rssSource, enabled: false, coverage_start: null, coverage_end: null };
+  const admin = await adminHarness({ sources: [source] });
+  admin.get("history-source").value = source.id;
+  admin.get("history-source").events.change();
+  assert.match(admin.get("history-coverage").textContent, /当前提供范围尚未确认/);
+  assert.match(admin.get("history-coverage").textContent, /未收录的文章无法补齐/);
+  assert.match(admin.get("service-status").textContent, /无需微信扫码/);
+  assert.doesNotMatch(admin.get("service-status").textContent, /请先完成微信登录/);
+});
+
+test("admin limited RSS history completion never claims the entire requested history is complete", async () => {
+  const job = { id: "limited-history", kind: "history", status: "completed", progress: { coverage_limited: true,
+    coverage_start: rssSource.coverage_start, coverage_end: rssSource.coverage_end } };
+  const admin = await adminHarness({ sources: [rssSource], jobs: [job] });
+  assert.match(nodeText(admin.get("jobs-list")), /已保存可获取部分/);
+  assert.doesNotMatch(nodeText(admin.get("jobs-list")), /已完成/);
+  await findNode(admin.get("jobs-list"), "查看详情").events.click();
+  await admin.settle();
+  assert.match(nodeText(admin.get("job-detail")), /已保存可获取部分/);
+  assert.match(nodeText(admin.get("job-detail")), /未收录的文章无法补齐/);
+  assert.doesNotMatch(nodeText(admin.get("job-detail")), /已完成/);
+});
+
+test("admin preparing imports offer cancellation without pause, resume or retry actions", async () => {
+  const job = { id: "preparing-history", kind: "history", status: "paused", progress: { preparing: true },
+    allowed_actions: ["pause", "resume", "retry", "cancel"] };
+  const admin = await adminHarness({ sources: [rssSource], jobs: [job] });
+  const list = admin.get("jobs-list");
+  for (const label of ["暂停", "继续", "重试失败项"]) assert.equal(findNode(list, label), null);
+  const cancel = findNode(list, "取消任务");
+  assert.ok(cancel);
+  await cancel.events.click();
+  await admin.settle();
+  assert.equal(admin.requests.filter(request => request.path === "/api/admin/jobs/preparing-history/cancel" && request.method === "POST").length, 1);
+  assert.ok(!admin.requests.some(request => /\/preparing-history\/(?:pause|resume|retry)$/.test(request.path)));
+});
 
 test("admin quota waiting retains its retry time in both task list and details", async () => {
   const job = { id: "quota-job", kind: "history", status: "waiting_quota", next_retry_at: Date.parse("2026-10-20T00:00:00Z") };

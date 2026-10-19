@@ -1,6 +1,7 @@
 import * as defaultCollector from './collector.js';
 import { automaticWindow, eligibleArticle, sanitizeBody, sha256, sourceArticleKey } from './core.js';
 import { ArchiveStore } from './store.js';
+import { RSS_ACCOUNT_BIZ } from './rss-source.js';
 
 const LEASE_MS = 180_000;
 const AUTH_CODES = new Set(['LOGIN_EXPIRED', 'LOGIN_REQUIRED', 'LOGIN_STALE', 'CHALLENGE_REQUIRED']);
@@ -87,6 +88,8 @@ async function boundary(context) {
 
 function captureAllowed(context, attempts = 0) {
   if (context.job.kind !== 'auto') return true;
+  if (context.rssSource && context.job.progress.rss_poll === true && context.job.article_key
+      && context.job.progress.selected_article?.source_key === context.job.article_key) return true;
   const time = context.now();
   if (time >= context.window.start && time < context.window.end) return true;
   return context.finalGrant && attempts === 0 && !context.job.progress.final_capture_used;
@@ -108,6 +111,7 @@ function pollTick(context) {
 
 async function startAutomaticPoll(context) {
   if (context.job.kind !== 'auto' || context.job.article_key) return null;
+  if (context.rssSource) return 'awaiting_window';
   if (!captureAllowed(context)) return 'awaiting_window';
   const tick = pollTick(context);
   const current = await context.store.getJob(context.job.id);
@@ -266,7 +270,7 @@ async function saveCapture(context, article, captured, token) {
   const saved = await context.store.patchArticle(article.id, {
     title: captured.title.trim(), account_name: captured.source_name || article.account_name,
     first_published_at: sourceTime, content_text: captured.text || '', summary: (captured.text || '').slice(0, 160),
-    metadata: { ...article.metadata, author: captured.author || '', source_name: captured.source_name || '',
+    metadata: { ...article.metadata, ...captured.metadata, author: captured.author || '', source_name: captured.source_name || '',
       original_url: captured.original_url || article.url },
     body_key: bodyKey, manifest: [...manifestByKey.values()], status: 'ready', captured_at: context.now(), last_error: null,
   }, token);
@@ -296,7 +300,7 @@ async function processItem(context, item) {
     await markPublished(context);
     return null;
   }
-  const windowDate = context.job.kind === 'auto' ? context.window.date : null;
+  const windowDate = context.job.kind === 'auto' ? (context.rssSource ? `rss:${pollTick(context)}` : context.window.date) : null;
   if (context.job.kind === 'auto' && item.attempt_window !== windowDate) {
     item = await context.store.updateJobItem(context.job.id, article.id, {
       status: 'pending', attempts: 0, attempt_window: windowDate, last_error: null,
@@ -323,7 +327,12 @@ async function processItem(context, item) {
           attempts: before + 1, attempt_window: windowDate, status: 'running', last_error: null,
         });
         try {
-          const captured = await withAccount(context, () => context.collector.captureArticle(context.env, article));
+          const rssEntry = context.job.progress.rss_articles?.find(entry => entry.source_key === article.source_key
+            || entry.url === article.url) || context.job.progress.selected_article;
+          const captureInput = context.rssSource && rssEntry?.metadata?.rss_snapshot_key
+            ? { ...article, ...rssEntry, first_published_at: rssEntry.published_at,
+              metadata: { ...article.metadata, ...rssEntry.metadata } } : article;
+          const captured = await withAccount(context, () => context.collector.captureArticle(context.env, captureInput));
           if (context.job.kind !== 'manual' && captured.published_at != null
               && (captured.published_at < context.job.range_start || captured.published_at >= context.job.range_end)) {
             throw failure('正文首次发布时间与选定范围不一致', 'PUBLICATION_TIME_MISMATCH');
@@ -429,6 +438,14 @@ async function enumerate(context) {
     if (page.has_more && (!Number.isSafeInteger(page.next_cursor) || page.next_cursor <= pageCursor || visited.has(page.next_cursor))) {
       throw failure('来源分页游标没有前进', 'SOURCE_FORMAT_CHANGED');
     }
+    if (context.rssSource && job.kind === 'history') {
+      const times = page.articles.map(entry => trustedTime(entry)).filter(value => value != null);
+      const start = times.length ? Math.min(...times) : null;
+      const end = times.length ? Math.max(...times) : null;
+      await rememberProgress(context, { rss_articles: page.articles,
+        coverage_start: start, coverage_end: end,
+        coverage_limited: start == null || job.range_start < start || job.range_end > end + 1 });
+    }
     if (job.kind === 'baseline') {
       await context.store.completeBaseline(source.id, page.articles, context.now());
       await checkpointPage(context, { list_cursor: page.next_cursor, enumeration_done: true }, { status: 'completed' });
@@ -506,11 +523,13 @@ export async function runArchiveBatch(env, jobId, {
   }
   if (!env.ARCHIVE_BUCKET) throw failure('尚未配置文章存储', 'CONFIG_MISSING');
   if (!Number.isInteger(maxPages) || maxPages < 1 || !Number.isInteger(maxArticles) || maxArticles < 1) throw failure('批次大小无效', 'INVALID_BATCH');
+  const source = job.source_id ? await store.getSource(job.source_id) : null;
   const owner = `${jobId}:${crypto.randomUUID()}`;
   const token = await store.acquireLease(`job:${jobId}`, owner, LEASE_MS);
   if (!token) return result('busy', jobId);
   const window = dispatchWindow || job.progress.dispatch_window || automaticWindow(now());
   const context = { env, job, store, now, collector, owner, bucket: env.ARCHIVE_BUCKET,
+    rssSource: source?.fakeid === `rss:${RSS_ACCOUNT_BIZ}`,
     maxPages, maxArticles, window, quotaRetryAt, browserRetryAt,
     finalGrant: job.kind === 'auto' && window.final === true && window.tick === window.end
       && now() >= window.end && now() < window.end + 300_000 && !job.progress.final_capture_used,
@@ -549,7 +568,8 @@ export async function runArchiveBatch(env, jobId, {
       let processed = 0;
       for (const item of items) {
         if (item.status === 'completed' || item.status === 'cancelled') continue;
-        if (item.status === 'failed' && !(job.kind === 'auto' && item.attempt_window !== window.date)) {
+        const attemptWindow = context.rssSource ? `rss:${pollTick(context)}` : window.date;
+        if (item.status === 'failed' && !(job.kind === 'auto' && item.attempt_window !== attemptWindow)) {
           if (job.kind === 'auto') {
             await store.updateJob(jobId, { status: 'awaiting_window' });
             return result('awaiting_window', jobId);

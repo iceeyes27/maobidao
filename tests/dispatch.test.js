@@ -6,6 +6,9 @@ import { ArchiveStore } from '../src/archive/store.js';
 import { dispatchJob, dispatchPending, scheduledArchive, signalWaitingJobs } from '../src/archive/dispatch.js';
 import { automaticWindow } from '../src/archive/core.js';
 import { runArchiveBatch } from '../src/archive/runner.js';
+import { CollectorError } from '../src/archive/collector-security.js';
+import { RSS_FAKEID } from '../src/archive/rss-schedule.js';
+import { RSS_FEED_URL } from '../src/archive/rss-source.js';
 
 class D1Adapter {
   constructor() {
@@ -239,4 +242,90 @@ test('a final authorization relays a finishing workflow once and cannot extend m
   assert.equal(restarts, 1);
   assert.equal((await store.listJobs()).length, 1);
   assert.equal((await store.listPendingDispatch()).length, 1);
+});
+
+test('a pinned RSS pending dispatch runs during daytime and retains the original publication-date quota', async t => {
+  const clock = Date.parse('2026-10-20T12:00:00+08:00');
+  t.mock.method(Date, 'now', () => clock);
+  const db = new D1Adapter();
+  t.after(() => db.sqlite.close());
+  const store = new ArchiveStore(db);
+  const source = await store.initSource({ name: '猫笔刀', fakeid: RSS_FAKEID });
+  await store.updateSource(source.id, { enabled: true });
+  await store.completeBaseline(source.id, [], clock - 2 * 86_400_000);
+  const window = automaticWindow(Date.parse('2026-10-19T22:00:00+08:00'));
+  const selected = { source_key: 'wechat:short:/s/rss-pending', url: 'https://mp.weixin.qq.com/s/rss-pending',
+    published_at: window.start + 60_000, time_trusted: true,
+    metadata: { source_kind: 'rss', rss_snapshot_key: `private/rss/articles/${'a'.repeat(64)}.json` } };
+  const job = await store.createJob({ kind: 'auto', source_id: source.id, monitor_date: window.date,
+    range_start: window.start, range_end: window.end });
+  await store.selectDailyArticle(source.id, window.date, selected.source_key, job.id);
+  await store.addJobArticle(job.id, selected);
+  // Recovery may happen after the last five-minute grant; RSS keeps its fixed
+  // article available all day without reserving the discovery day's quota.
+  await store.patchJobProgress(job.id, { rss_poll: true, selected_article: selected,
+    dispatch_window: { date: window.date, start: clock - 300_000, end: clock, tick: clock - 300_000, rss: true } });
+  const created = [];
+  const env = { ARCHIVE_DB: db, ARCHIVE_AUTO_ENABLED: 'true', ARCHIVE_WORKFLOW: {
+    get: async () => { throw new Error('Workflow instance not found'); },
+    create: async options => { created.push(options); return { id: options.id }; },
+  } };
+  assert.equal(automaticWindow(clock).active, false);
+  assert.equal(await dispatchPending(env), 1);
+  assert.equal(await dispatchPending(env), 0);
+  assert.deepEqual(created, [{ id: job.workflow_id, params: { job_id: job.id } }]);
+  assert.equal((await store.getJob(job.id)).article_key, selected.source_key);
+  assert.equal((await store.getDaily(source.id, window.date)).status, 'selected');
+  assert.equal((await store.getDaily(source.id, window.date)).capture_completed_at, null);
+  assert.equal(await store.getDaily(source.id, '2026-10-20'), null);
+});
+
+test('RSS fetch failure still dispatches an already captured publication and propagates the original error', async t => {
+  const clock = Date.parse('2026-10-20T12:00:00+08:00');
+  t.mock.method(Date, 'now', () => clock);
+  const db = new D1Adapter();
+  t.after(() => db.sqlite.close());
+  const store = new ArchiveStore(db);
+  const source = await store.initSource({ name: '猫笔刀', fakeid: RSS_FAKEID });
+  await store.updateSource(source.id, { enabled: true });
+  await store.completeBaseline(source.id, [], clock - 2 * 86_400_000);
+  const window = automaticWindow(Date.parse('2026-10-19T22:00:00+08:00'));
+  const job = await store.createJob({ kind: 'auto', source_id: source.id, monitor_date: window.date,
+    range_start: window.start, range_end: window.end });
+  const selected = { source_key: 'wechat:short:/s/rss-ready', url: 'https://mp.weixin.qq.com/s/rss-ready' };
+  await store.selectDailyArticle(source.id, window.date, selected.source_key, job.id);
+  const { article } = await store.addJobArticle(job.id, selected);
+  const lease = await store.claimArticle(article.id, 'saved-capture', 60_000);
+  await store.patchArticle(article.id, { status: 'ready', captured_at: clock - 1000,
+    body_key: `articles/${article.id}/body.html`, manifest: [] }, lease);
+  await store.releaseLease(lease);
+
+  const upstreamError = new CollectorError('UPSTREAM_ERROR', 'RSS synthetic fetch failure', true);
+  let feeds = 0;
+  t.mock.method(globalThis, 'fetch', async value => {
+    const url = new URL(value);
+    if (url.hostname === 'cloudflare-dns.com') {
+      return Response.json({ Status: 0, Answer: url.searchParams.get('type') === 'A'
+        ? [{ type: 1, data: '1.1.1.1' }] : [] });
+    }
+    assert.equal(url.href, RSS_FEED_URL);
+    feeds++;
+    throw upstreamError;
+  });
+  const created = [];
+  const env = { ARCHIVE_DB: db, ARCHIVE_AUTO_ENABLED: 'true', ARCHIVE_BUCKET: {
+    get: async () => null, put: async () => assert.fail('A failed feed cannot write a snapshot'),
+  }, ARCHIVE_WORKFLOW: {
+    get: async () => { throw new Error('Workflow instance not found'); },
+    create: async options => { created.push(options); return { id: options.id }; },
+  } };
+  await assert.rejects(scheduledArchive({ scheduledTime: clock }, env), error => error === upstreamError);
+  assert.equal(feeds, 1);
+  assert.deepEqual(created, [{ id: job.workflow_id, params: { job_id: job.id } }]);
+  assert.equal((await store.listPendingDispatch()).length, 0);
+  assert.equal((await store.getArticle(article.id)).status, 'ready');
+  assert.equal((await store.getArticle(article.id)).captured_at, clock - 1000);
+  assert.equal((await store.getJob(job.id)).status, 'queued');
+  assert.equal((await store.getDaily(source.id, window.date)).selected_article_key, selected.source_key);
+  assert.equal((await store.listPublished()).length, 0);
 });

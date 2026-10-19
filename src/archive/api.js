@@ -2,6 +2,21 @@ import { ArchiveStore } from "./store.js";
 import { ArchiveError, adminCookie, beijingDate, checkOrigin, createAdminSession, equalSecret, historyRange, isAdmin, json, publicUrl, readJson, sha256, stableId } from "./core.js";
 import { dispatchJob, dispatchPending, signalWaitingJobs } from "./dispatch.js";
 import { ensureScheduler } from "./scheduler.js";
+import { isRssSource } from "./rss-schedule.js";
+import { RSS_ACCOUNT_BIZ, RSS_FEED_URL, RSS_STATE_KEY } from "./rss-source.js";
+
+async function rssCoverage(env) {
+  try {
+    const object = await env.ARCHIVE_BUCKET?.get(RSS_STATE_KEY);
+    if (!object || object.size > 128 * 1024) return {};
+    const state = JSON.parse(await object.text());
+    if (state.kind !== 'wechat-rss-source-state' || state.feed_url !== RSS_FEED_URL
+        || state.account_biz !== RSS_ACCOUNT_BIZ || !Number.isSafeInteger(state.coverage_start)
+        || !Number.isSafeInteger(state.coverage_end) || state.coverage_start > state.coverage_end) return {};
+    return { rss_feed_url: RSS_FEED_URL, coverage_start: state.coverage_start,
+      coverage_end: state.coverage_end, last_checked_at: state.fetched_at };
+  } catch { return {}; }
+}
 
 export function missingBindings(env) {
   return ["ARCHIVE_DB", "ARCHIVE_BUCKET", "ARCHIVE_BROWSER", "ARCHIVE_WORKFLOW", "ARCHIVE_EXECUTOR", "ARCHIVE_SCHEDULER", "ARCHIVE_SESSION_KEY", "SUBMIT_PASSWORD"].filter((name) => !env[name]);
@@ -99,7 +114,10 @@ export async function handleAdmin(request, env) {
 
   if (url.pathname === "/api/admin/status") {
     requireMethod(request, "GET");
-    const sources = store ? await store.listSources() : [];
+    const rows = store ? await store.listSources() : [];
+    const coverage = rows.some(isRssSource) ? await rssCoverage(env) : {};
+    const sources = rows.map(source => ({ ...source, provider: isRssSource(source) ? 'rss' : 'wechat',
+      ...(isRssSource(source) ? coverage : {}) }));
     const jobs = store ? await store.listJobs(30) : [];
     const latestLogin = store ? await env.ARCHIVE_DB.prepare("SELECT id,status,purpose,expires_at FROM archive_login ORDER BY created_at DESC LIMIT 1").first() : null;
     const session = store ? await env.ARCHIVE_DB.prepare("SELECT version,object_key FROM archive_session WHERE singleton=1").first() : null;

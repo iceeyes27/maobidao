@@ -113,16 +113,17 @@ export class ArchiveStore {
     return result.results.map(rowObject);
   }
 
-  async initSource({ name, fakeid, account_biz = null }) {
+  async initSource({ name, fakeid, account_biz = null, enabled = true }) {
     name = required(name, 'name');
     fakeid = required(fakeid, 'fakeid');
+    if (typeof enabled !== 'boolean') throw fail('enabled must be boolean');
     const id = await stableId(`source:${fakeid}`);
     const now = Date.now();
     await this.statement(`INSERT INTO archive_sources
-      (id,name,fakeid,account_biz,created_at,updated_at) VALUES (?,?,?,?,?,?)
+      (id,name,fakeid,account_biz,enabled,created_at,updated_at) VALUES (?,?,?,?,?,?,?)
       ON CONFLICT(fakeid) DO UPDATE SET name=excluded.name,
         account_biz=COALESCE(excluded.account_biz,archive_sources.account_biz),updated_at=excluded.updated_at`,
-    [id, name, fakeid, account_biz, now, now]).run();
+    [id, name, fakeid, account_biz, Number(enabled), now, now]).run();
     return this.getSource(id);
   }
 
@@ -165,7 +166,8 @@ export class ArchiveStore {
     return Boolean(await this.first('SELECT source_key FROM archive_source_baseline WHERE source_id=? AND source_key=?', [sourceId, key]));
   }
 
-  async createJob(input, idempotencyKey = null) {
+  async createJob(input, idempotencyKey = null, { paused = false, preparing = false } = {}) {
+    if (typeof paused !== 'boolean' || typeof preparing !== 'boolean') throw fail('Job preparation flags must be boolean');
     if (!['baseline', 'history', 'manual', 'auto'].includes(input.kind)) throw fail('Unsupported job kind');
     const payload = {
       kind: input.kind, source_id: input.source_id || null,
@@ -191,10 +193,11 @@ export class ArchiveStore {
     const now = Date.now();
     await this.db.batch([
       this.statement(`INSERT OR IGNORE INTO archive_jobs
-        (id,kind,source_id,range_start,range_end,urls_json,monitor_date,article_key,workflow_id,idempotency_key,request_fingerprint,created_at,updated_at)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        (id,kind,source_id,range_start,range_end,urls_json,monitor_date,article_key,workflow_id,idempotency_key,request_fingerprint,created_at,updated_at,status,progress_json)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       [id, payload.kind, payload.source_id, payload.range_start, payload.range_end, encode(payload.urls),
-        payload.monitor_date, payload.article_key, workflowId, idempotencyKey || null, fingerprint, now, now]),
+        payload.monitor_date, payload.article_key, workflowId, idempotencyKey || null, fingerprint, now, now,
+        paused || preparing ? 'paused' : 'queued', encode(preparing ? { preparing: true } : {})]),
       this.statement(`INSERT OR IGNORE INTO archive_dispatch_outbox(job_id,workflow_id,created_at)
         SELECT id,workflow_id,? FROM archive_jobs WHERE id=?`, [now, id]),
     ]);
@@ -488,6 +491,9 @@ export class ArchiveStore {
     if (!['pause', 'resume', 'cancel', 'retry'].includes(action)) throw fail('Unsupported job action');
     const job = await this.getJob(jobId);
     if (!job) throw fail('Job not found', 404);
+    if (job.progress.preparing === true && action !== 'cancel') {
+      throw fail('任务正在准备文章快照，请等待准备完成后再操作；当前可以取消任务。', 409);
+    }
     if (job.status === 'cancelled') return job;
     if (job.status === 'completed' || job.status === 'partial_failed' && action !== 'retry') return job;
     if (action === 'pause' && ['completed', 'partial_failed', 'failed'].includes(job.status)) return job;

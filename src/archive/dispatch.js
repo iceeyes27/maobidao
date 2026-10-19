@@ -1,5 +1,6 @@
 import { ArchiveStore } from "./store.js";
 import { automaticWindow } from "./core.js";
+import { dispatchRssSources, isRssSource } from "./rss-schedule.js";
 
 const TERMINAL = new Set(["completed", "cancelled", "partial_failed", "failed"]);
 
@@ -61,7 +62,9 @@ export async function dispatchPending(env) {
       const time = Date.now();
       const finalGrant = window?.final && window.tick === window.end && time >= window.end
         && time < window.end + 300_000 && !job.progress?.final_capture_used;
-      if (!article?.captured_at && !automaticWindow(time).active && !finalGrant) continue;
+      const rss = job.progress?.rss_poll === true && job.progress.selected_article?.source_key === job.article_key
+        && isRssSource(await store.getSource(job.source_id));
+      if (!article?.captured_at && !rss && !automaticWindow(time).active && !finalGrant) continue;
     }
     try { if (await dispatchJob(env, job)) count++; }
     catch { console.warn(JSON.stringify({ event: "archive_dispatch_pending", job_id: job.id })); }
@@ -103,11 +106,13 @@ export async function scheduledArchive(controller, env) {
   }
   const tick = Number(controller.scheduledTime || Date.now());
   const window = { ...automaticWindow(tick), tick };
+  try { await dispatchRssSources({ env, store, tick, dispatchJob }); }
+  catch (error) { await dispatchPending(env); throw error; }
   if (env.ARCHIVE_AUTO_ENABLED === "true" && window.active) {
     const sourceLease = await store.acquireLease("source-config", `schedule:${tick}`, 30_000);
     let sources = [];
     if (sourceLease) {
-      try { sources = (await store.listSources()).filter((source) => source.enabled && source.baseline_completed_at); }
+      try { sources = (await store.listSources()).filter((source) => source.enabled && source.baseline_completed_at && !isRssSource(source)); }
       finally { await store.releaseLease(sourceLease); }
     }
     // One enabled source is the current product contract; refuse an inconsistent configuration.

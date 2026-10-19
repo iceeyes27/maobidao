@@ -5,6 +5,7 @@ import { test } from 'node:test';
 import { runArchiveBatch } from '../src/archive/runner.js';
 import { ArchiveStore } from '../src/archive/store.js';
 import { automaticWindow, sourceArticleKey } from '../src/archive/core.js';
+import { RSS_ACCOUNT_BIZ } from '../src/archive/rss-source.js';
 
 class D1Adapter {
   constructor() {
@@ -92,6 +93,97 @@ test('manual archive saves all images and sanitized body before publishing', asy
   assert.match(html, new RegExp(`/media/${article.id}/[a-f0-9]{64}`));
   assert.doesNotMatch(html, /script|alert\(1\)|https:\/\/example.com\/picture/);
   assert.equal(bucket.writes.at(-1), article.body_key);
+});
+
+test('a delayed RSS automatic article uses its saved body outside the original day window and remains unique', async t => {
+  const { env, store } = setup(t);
+  const s = await store.initSource({ name: '猫笔刀', fakeid: `rss:${RSS_ACCOUNT_BIZ}` });
+  await store.completeBaseline(s.id, [], at('00:00:00'));
+  const selected = { ...entry('delayed'), metadata: { source_kind: 'rss', rss_snapshot_key: `private/rss/articles/${'a'.repeat(64)}.json` } };
+  const job = await auto(store, s.id);
+  // A pre-existing failed/manual discovery has no RSS metadata.
+  await store.addJobArticle(job.id, { ...selected, metadata: {} });
+  await store.selectDailyArticle(s.id, job.monitor_date, selected.source_key, job.id);
+  await store.patchJobProgress(job.id, { rss_poll: true, selected_article: selected });
+  let captures = 0;
+  const collector = { listSourceArticles: () => assert.fail('Pinned RSS must not request an upstream list'),
+    captureArticle: async (_env, article) => {
+      captures++;
+      assert.equal(article.metadata.rss_snapshot_key, selected.metadata.rss_snapshot_key);
+      return capture(article);
+    } };
+  const time = at('08:00:00', '2026-10-20');
+  const args = { collector, now: () => time, dispatchWindow: { date: job.monitor_date, start: time, end: time + 300_000, tick: time, rss: true } };
+  assert.equal((await runArchiveBatch(env, job.id, args)).state, 'completed');
+  assert.equal((await runArchiveBatch(env, job.id, args)).state, 'completed');
+  assert.equal(captures, 1);
+  assert.equal((await store.getDaily(s.id, job.monitor_date)).status, 'completed');
+  assert.equal(await store.getDaily(s.id, '2026-10-20'), null);
+});
+
+test('an unpinned RSS automatic outbox cannot enumerate or capture even during the original window', async t => {
+  const { env, store } = setup(t);
+  const s = await store.initSource({ name: '猫笔刀', fakeid: `rss:${RSS_ACCOUNT_BIZ}` });
+  await store.completeBaseline(s.id, [], at('00:00:00'));
+  const job = await auto(store, s.id);
+  const collector = { listSourceArticles: () => assert.fail('RSS selection must finish in the scheduler'),
+    captureArticle: () => assert.fail('RSS selection must finish in the scheduler') };
+  assert.equal((await runArchiveBatch(env, job.id, options(collector))).state, 'awaiting_window');
+  assert.equal((await store.getJob(job.id)).article_key, null);
+});
+
+test('RSS capture exhausts three attempts per tick then retries the same snapshot on the next tick', async t => {
+  const { env, store } = setup(t);
+  const s = await store.initSource({ name: '猫笔刀', fakeid: `rss:${RSS_ACCOUNT_BIZ}` });
+  await store.completeBaseline(s.id, [], at('00:00:00'));
+  const selected = { ...entry('retry-rss'), metadata: { source_kind: 'rss', rss_snapshot_key: `private/rss/articles/${'c'.repeat(64)}.json` } };
+  const job = await auto(store, s.id);
+  await store.selectDailyArticle(s.id, job.monitor_date, selected.source_key, job.id);
+  let time = at('08:00:00', '2026-10-20');
+  const grant = () => ({ date: job.monitor_date, start: time, end: time + 300_000, tick: time, rss: true });
+  await store.patchJobProgress(job.id, { rss_poll: true, selected_article: selected, dispatch_window: grant() });
+  let calls = 0;
+  const collector = { captureArticle: async (_env, article) => {
+    assert.equal(article.source_key, selected.source_key);
+    assert.equal(article.metadata.rss_snapshot_key, selected.metadata.rss_snapshot_key);
+    calls++;
+    if (calls <= 3) throw problem('IMAGE_INCOMPLETE', true);
+    return capture(article);
+  } };
+  const opts = () => ({ collector, now: () => time, dispatchWindow: grant() });
+  for (let attempt = 0; attempt < 4; attempt++) await runArchiveBatch(env, job.id, opts());
+  assert.equal(calls, 3);
+  assert.equal((await store.getJob(job.id)).article_key, selected.source_key);
+  time += 300_000;
+  assert.equal((await runArchiveBatch(env, job.id, opts())).state, 'completed');
+  assert.equal(calls, 4);
+  assert.equal((await store.listPublished()).length, 1);
+  assert.equal((await store.getDaily(s.id, job.monitor_date)).selected_article_key, selected.source_key);
+});
+
+test('RSS flags cannot authorize a WeChat source outside its original window', async t => {
+  const { env, store } = setup(t);
+  const s = await source(store);
+  const job = await auto(store, s.id);
+  const selected = entry('ordinary');
+  await store.selectDailyArticle(s.id, job.monitor_date, selected.source_key, job.id);
+  await store.patchJobProgress(job.id, { rss_poll: true, selected_article: selected });
+  const collector = { captureArticle: () => assert.fail('Ordinary source still requires its original window') };
+  assert.equal((await runArchiveBatch(env, job.id, options(collector, at('08:00:00')))).state, 'awaiting_window');
+});
+
+test('RSS history reports unavailable requested coverage while publishing available bodies', async t => {
+  const { env, store } = setup(t);
+  const s = await store.initSource({ name: '猫笔刀', fakeid: `rss:${RSS_ACCOUNT_BIZ}` });
+  const selected = { ...entry('history'), metadata: { source_kind: 'rss', rss_snapshot_key: `private/rss/articles/${'b'.repeat(64)}.json` } };
+  const job = await store.createJob({ kind: 'history', source_id: s.id, range_start: at('00:00:00'), range_end: at('23:00:00') });
+  const collector = {
+    listSourceArticles: async () => ({ articles: [selected], next_cursor: 1, has_more: false }),
+    captureArticle: async (_env, article) => { assert.ok(article.metadata.rss_snapshot_key); return capture(article); },
+  };
+  assert.equal((await runArchiveBatch(env, job.id, options(collector, at('08:00:00', '2026-10-20')))).state, 'completed');
+  assert.equal((await store.getJob(job.id)).progress.coverage_limited, true);
+  assert.equal((await store.listPublished()).length, 1);
 });
 
 test('a failed image write never makes an article visible and history continues', async (t) => {

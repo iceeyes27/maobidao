@@ -7,6 +7,7 @@ import { summarizeBrowserUsage } from './browser-usage.js';
 import { createWechatHttp } from './wechat-http.js';
 import { parseArticleHtml } from './article-parser.js';
 import { loadArticleVerification, saveArticleVerification } from './article-verification.js';
+import { createRssSource, loadRssArticle, RSS_ACCOUNT_BIZ } from './rss-source.js';
 
 export { CollectorError } from './collector-security.js';
 
@@ -276,6 +277,11 @@ export function createCollector({ playwright, fetchImpl = fetch, resolveHost, no
     return sources;
   }
   async function listSourceArticles(env, source, { cursor = 0, count = 5 } = {}) {
+    if (source?.fakeid === `rss:${RSS_ACCOUNT_BIZ}`) {
+      if (cursor !== 0) throw new CollectorError('INVALID_QUERY', 'RSS 文章列表仅支持完整快照');
+      const feed = await createRssSource({ fetchImpl, resolveHost, now }).fetchSource(env, source);
+      return { ...feed, next_cursor: feed.articles.length, has_more: false, transport: 'rss' };
+    }
     if (!source?.fakeid || !/^[\w=+/-]{1,256}$/.test(source.fakeid) || !Number.isSafeInteger(cursor) || cursor < 0 || !Number.isInteger(count) || count < 1 || count > 20) {
       throw new CollectorError('INVALID_QUERY', '公众号标识或分页参数无效');
     }
@@ -298,6 +304,19 @@ export function createCollector({ playwright, fetchImpl = fetch, resolveHost, no
       if (!checkedHosts.has(hostname)) checkedHosts.set(hostname, (resolveHost || resolvePublicHost)(hostname, request));
       await checkedHosts.get(hostname);
     };
+    if (article?.metadata?.rss_snapshot_key) {
+      const saved = await loadRssArticle(env, { ...article, published_at: article.first_published_at ?? article.published_at });
+      assertArticle({ ...saved, images: saved.images.map(image => image.source_url) });
+      const images = [];
+      let totalBytes = 0;
+      for (const { source_url: sourceUrl } of saved.images) {
+        const image = await fetchCaptureImage(env, sourceUrl, resolveCaptureHost);
+        totalBytes += image.bytes.byteLength;
+        if (totalBytes > ARTICLE_IMAGE_LIMIT) throw new CollectorError('RESOURCE_TOO_LARGE', '文章图片总大小超过允许范围');
+        images.push({ source_url: sourceUrl, bytes: image.bytes, content_type: image.contentType });
+      }
+      return { ...saved, images };
+    }
     const fetched = await safeFetch(url.href, { fetchImpl, resolveHost: resolveCaptureHost, maxBytes: HTML_LIMIT });
     if (!/^text\/html|^application\/xhtml\+xml/i.test(fetched.contentType)) throw new CollectorError('ARTICLE_INVALID', '链接未返回 HTML 文章');
     try {

@@ -10,7 +10,7 @@ const hooks = registerHooks({
   resolve(specifier, context, next) {
     if (specifier === 'cloudflare:workers') return { url: 'test:executor-cloudflare', shortCircuit: true };
     if (context.parentURL?.includes('/src/archive/executor.js')) {
-      for (const name of ['collector', 'dispatch', 'runner', 'resources']) {
+      for (const name of ['collector', 'dispatch', 'runner', 'resources', 'rss-bootstrap']) {
         if (specifier === `./${name}.js`) return { url: `test:executor-${name}`, shortCircuit: true };
       }
     }
@@ -20,7 +20,8 @@ const hooks = registerHooks({
     let source;
     if (url === 'test:executor-cloudflare') source = 'export class DurableObject { constructor(ctx,env) { this.ctx=ctx;this.env=env; } }';
     if (url === 'test:executor-collector') source = names.map((name) => `export const ${name}=(...args)=>globalThis.__archiveExecutorMocks.${name}(...args);`).join('\n');
-    if (url === 'test:executor-dispatch') source = 'export const scheduledArchive=(...args)=>globalThis.__archiveExecutorMocks.schedule(...args); export const dispatchPending=(...args)=>globalThis.__archiveExecutorMocks.pending(...args);';
+    if (url === 'test:executor-dispatch') source = 'export const scheduledArchive=(...args)=>globalThis.__archiveExecutorMocks.schedule(...args); export const dispatchPending=(...args)=>globalThis.__archiveExecutorMocks.pending(...args); export const dispatchJob=(...args)=>globalThis.__archiveExecutorMocks.dispatch(...args);';
+    if (url === 'test:executor-rss-bootstrap') source = 'export const bootstrapRss=(...args)=>globalThis.__archiveExecutorMocks.bootstrap(...args);';
     if (url === 'test:executor-runner') source = 'export const runArchiveBatch=(...args)=>globalThis.__archiveExecutorMocks.run(...args);';
     if (url === 'test:executor-resources') source = 'export const fetchImageResource=(...args)=>globalThis.__archiveExecutorMocks.fetchImage(...args);';
     return source ? { format: 'module', source, shortCircuit: true } : next(url, context);
