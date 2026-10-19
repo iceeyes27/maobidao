@@ -12,6 +12,19 @@ export class ArchiveWorkflow extends WorkflowEntrypoint {
         if (!lease) return { state: "busy", prepared: false, code: "BUSY" };
         try {
           const response = await this.env.ARCHIVE_EXECUTOR.getByName("wechat-account").collectorOperation("createLoginSession", []);
+          if (response.ok && event.payload.verify_lifecycle) {
+            const executor = this.env.ARCHIVE_EXECUTOR.getByName("wechat-account");
+            const id = response.value.session_id;
+            const checks = [];
+            for (let poll = 0; poll < 2; poll++) {
+              const status = await executor.collectorOperation("getLoginSession", [id]);
+              if (!status.ok || status.value.status !== "waiting") return { state: "failed", phase: "reconnect", code: status.error?.code || status.value?.status };
+              const screenshot = await executor.collectorOperation("getLoginScreenshot", [id]);
+              if (!screenshot.ok) return { state: "failed", phase: "screenshot", code: screenshot.error.code };
+              checks.push({ status: status.value.status, screenshot_bytes: screenshot.value.bytes.byteLength });
+            }
+            return { state: "waiting_auth", prepared: true, checks };
+          }
           return response.ok ? { state: "waiting_auth", prepared: true } : {
             state: "failed", code: response.error.code,
             phase: response.error.phase || null, diagnostic: response.error.diagnostic || null,

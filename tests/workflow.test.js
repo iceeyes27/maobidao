@@ -36,7 +36,7 @@ function fixture(t, { lease = { resource: 'wechat-account', owner: 'test', gener
     return {
       async collectorOperation(operationName, args) {
         calls.push({ type: 'collector', name, operationName, args });
-        return operation();
+        return operation(operationName, args);
       },
     };
   } } };
@@ -55,6 +55,39 @@ test('operator login preparation acquires and releases the same account lease wi
   assert.equal(calls[0].ttl, 90_000);
   assert.match(calls[0].owner, /^prepare-login:/);
   assert.deepEqual(calls[1], { type: 'collector', name: 'wechat-account', operationName: 'createLoginSession', args: [] });
+});
+
+test('operator lifecycle verification reconnects twice and returns only status and screenshot sizes', async t => {
+  const sessionId = 'private-session';
+  const { calls, workflow, step } = fixture(t, { operation: async (name, args) => {
+    if (name === 'createLoginSession') return { ok: true, value: {
+      session_id: sessionId, live_view_url: 'https://private.example/?jwt=private',
+    } };
+    assert.deepEqual(args, [sessionId]);
+    if (name === 'getLoginSession') return { ok: true, value: { status: 'waiting' } };
+    assert.equal(name, 'getLoginScreenshot');
+    return { ok: true, value: { bytes: new Uint8Array([7, 8, 9]) } };
+  } });
+  const result = await workflow.run({ payload: { action: 'prepare-login', verify_lifecycle: true } }, step);
+  assert.deepEqual(result, { state: 'waiting_auth', prepared: true, checks: [
+    { status: 'waiting', screenshot_bytes: 3 }, { status: 'waiting', screenshot_bytes: 3 },
+  ] });
+  assert.deepEqual(calls.filter(call => call.type === 'collector').map(call => call.operationName), [
+    'createLoginSession', 'getLoginSession', 'getLoginScreenshot', 'getLoginSession', 'getLoginScreenshot',
+  ]);
+  assert.equal(calls.at(-1).type, 'release');
+  assert.doesNotMatch(JSON.stringify(result), /private-session|private\.example|jwt/);
+});
+
+test('operator lifecycle verification stops and releases its lease when reconnecting expires', async t => {
+  const { calls, workflow, step } = fixture(t, { operation: async name => name === 'createLoginSession'
+    ? { ok: true, value: { session_id: 'private-session' } }
+    : { ok: false, error: { code: 'LOGIN_EXPIRED' } } });
+  assert.deepEqual(await workflow.run({ payload: { action: 'prepare-login', verify_lifecycle: true } }, step), {
+    state: 'failed', phase: 'reconnect', code: 'LOGIN_EXPIRED',
+  });
+  assert.equal(calls.at(-1).type, 'release');
+  assert.equal(calls.filter(call => call.type === 'collector').length, 2);
 });
 
 test('operator login preparation does not contact a browser while the account lease is busy', async t => {

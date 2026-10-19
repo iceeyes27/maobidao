@@ -53,14 +53,14 @@ const documentResult = (extra = {}) => ({
 });
 
 function browserDouble(doc = documentResult()) {
-  const calls = { launches: [], acquisitions: [], closes: 0, decodes: 0, contextOptions: [], urls: [] };
+  const calls = { launches: [], acquisitions: [], connections: [], closes: 0, decodes: 0, contextOptions: [], urls: [] };
   let currentUrl = 'https://mp.weixin.qq.com/';
   let storage = { cookies: [{ name: 'session', value: 'private-cookie', domain: 'mp.weixin.qq.com', path: '/' }], origins: [] };
   const page = {
     goto: async url => { calls.urls.push(url); }, url: () => currentUrl,
     waitForURL: async () => {},
     route: async (_pattern, handler) => { calls.route = handler; },
-    setContent: async html => { calls.html = html; }, screenshot: async () => png,
+    setContent: async html => { calls.html = html; }, bringToFront: async () => {}, screenshot: async () => png,
     evaluate: async (fn, arg) => {
       if (fn === extractArticleDocument) return Array.isArray(doc) ? doc.shift() : doc;
       if (arg?.base64) { calls.decodes++; return calls.decodeResult !== false; }
@@ -74,12 +74,13 @@ function browserDouble(doc = documentResult()) {
     return {};
   } };
   const context = { pages: () => [page], newPage: async () => page, storageState: async () => storage, newCDPSession: async () => cdp,
+    addInitScript: async script => { calls.initScript = script; }, clearCookies: async () => {}, addCookies: async cookies => { calls.restoredCookies = cookies; },
     route: async (_pattern, handler) => { calls.contextRoute = handler; } };
   const browser = { newContext: async options => { calls.contextOptions.push(options); return context; },
     contexts: () => [context], close: async () => { calls.closes++; }, newBrowserCDPSession: async () => cdp };
   const playwright = {
     launch: async (_binding, options) => { calls.launches.push(options); return browser; },
-    acquire: async (_binding, options) => { calls.acquisitions.push(options); return { sessionId: 'remote-browser-id' }; }, connect: async () => browser,
+    acquire: async (_binding, options) => { calls.acquisitions.push(options); return { sessionId: 'remote-browser-id' }; }, connect: async (_binding, options) => { calls.connections.push(options); return browser; },
   };
   return { playwright, calls, setUrl: value => { currentUrl = value; }, setStorage: value => { storage = value; } };
 }
@@ -307,7 +308,7 @@ test('login completion verifies the backend before saving and reconnects by opaq
   assert.equal([...env.ARCHIVE_BUCKET.values.values()][0].includes('private-cookie'), false);
   assert.ok(fake.calls.urls.some(url => url.includes('/cgi-bin/searchbiz?')));
   assert.deepEqual(await collector.finishLoginSession(env, login.session_id), { authenticated: true, version: 1, status: 'authenticated', expires_at: login.expires_at, purpose: 'account' });
-  await assert.rejects(collector.getLoginScreenshot(env, login.session_id), hasCode('LOGIN_STALE'));
+  await assert.rejects(collector.getLoginScreenshot(env, login.session_id), hasCode('LOGIN_ALREADY_AUTHENTICATED'));
 });
 
 test('restoring saved cookies never substitutes for verifying actual backend login', async t => {
@@ -382,9 +383,9 @@ test('creating a login replaces a confirmed missing browser in the same request'
   await store.attachBrowser(previous, 'expired-browser', 'https://live.browser.run/ui/view?jwt=private');
   const fake = browserDouble();
   const connect = fake.playwright.connect;
-  fake.playwright.connect = async (binding, id) => {
-    if (id === 'expired-browser') throw new Error('Unable to connect to browser: code: 404');
-    return connect(binding, id);
+  fake.playwright.connect = async (binding, options) => {
+    if (options?.sessionId === 'expired-browser') throw new Error('Unable to connect to browser: code: 404');
+    return connect(binding, options);
   };
   const collector = createCollector({ playwright: fake.playwright });
   const replaced = await collector.createLoginSession(env);
@@ -660,4 +661,107 @@ test('unknown DNS errors include a bounded private diagnostic for execution-cont
     assert.ok(error.diagnostic.length <= 400);
     return true;
   });
+});
+
+test('human login survives successive connections without an incognito context', async t => {
+  const env = environment(t);
+  const fake = browserDouble();
+  const browser = await fake.playwright.connect();
+  const connect = fake.playwright.connect;
+  fake.calls.connections.length = 0;
+  browser.newContext = async () => assert.fail('A detached incognito context cannot host human login');
+  fake.playwright.connect = async (binding, options) => {
+    assert.equal(options?.persistent, true, 'Reconnect must discover existing default-context pages');
+    return connect(binding, options);
+  };
+  const collector = createCollector({ playwright: fake.playwright });
+  const login = await collector.createLoginSession(env);
+  for (let poll = 0; poll < 3; poll++) {
+    assert.equal((await collector.getLoginSession(env, login.session_id)).status, 'waiting');
+    const screenshot = await collector.getLoginScreenshot(env, login.session_id);
+    assert.equal(screenshot.status, 200);
+    assert.equal((await screenshot.arrayBuffer()).byteLength, png.byteLength);
+  }
+  assert.equal(fake.calls.acquisitions.length, 1);
+  assert.equal(fake.calls.connections.length, 7);
+  assert.equal((await new SessionStore(env).get(login.session_id)).status, 'waiting');
+});
+
+test('a stale expiration cannot replace authenticated state or release a newer login', async t => {
+  const env = environment(t);
+  const store = new SessionStore(env);
+  const login = await store.beginLogin();
+  await store.save({ cookies: [], origins: [] }, 0, login.id);
+  for (const status of ['expired', 'failed', 'stale']) assert.equal(await store.mark(login.id, status), false);
+  assert.equal((await store.get(login.id)).status, 'authenticated');
+  const next = await store.beginLogin();
+  assert.equal(await store.mark(login.id, 'expired'), false);
+  assert.equal((await store.current()).active_login_id, next.id);
+  assert.equal((await env.ARCHIVE_DB.prepare('SELECT status FROM archive_login WHERE id=?').bind(login.id).first()).status, 'authenticated');
+});
+
+for (const operation of ['getLoginSession', 'getLoginScreenshot']) {
+  test(`an older ${operation} reconnect failure cannot undo a completed login`, async t => {
+    const env = environment(t);
+    const fake = browserDouble();
+    const collector = createCollector({ playwright: fake.playwright });
+    const login = await collector.createLoginSession(env);
+    const connect = fake.playwright.connect;
+    let entered;
+    const started = new Promise(resolve => { entered = resolve; });
+    let rejectPoll;
+    let reconnects = 0;
+    fake.playwright.connect = async (...args) => {
+      if (++reconnects === 1) {
+        entered();
+        return new Promise((_resolve, reject) => { rejectPoll = reject; });
+      }
+      return connect(...args);
+    };
+    const pending = collector[operation](env, login.session_id);
+    // Attach both rejection and resolution observers before releasing the race.
+    const observed = pending.then(value => ({ value }), error => ({ error }));
+    await started;
+    fake.setUrl('https://mp.weixin.qq.com/cgi-bin/home?token=123456');
+    assert.equal((await collector.finishLoginSession(env, login.session_id)).authenticated, true);
+    rejectPoll(new Error('Unable to connect to browser: code: 404: Browser session not found'));
+    const result = await observed;
+    if (operation === 'getLoginSession') assert.equal(result.value?.status, 'authenticated');
+    else assert.equal(result.error?.code, 'LOGIN_ALREADY_AUTHENTICATED');
+    assert.equal((await new SessionStore(env).get(login.session_id)).status, 'authenticated');
+  });
+}
+
+test('authentication committed between a poll recheck and expiration CAS still wins', async t => {
+  const env = environment(t);
+  const fake = browserDouble();
+  const collector = createCollector({ playwright: fake.playwright });
+  const login = await collector.createLoginSession(env);
+  const batch = env.ARCHIVE_DB.batch.bind(env.ARCHIVE_DB);
+  let committed = false;
+  env.ARCHIVE_DB.batch = async statements => {
+    if (!committed) {
+      committed = true;
+      await new SessionStore(env).save({ cookies: [], origins: [] }, 0, login.session_id);
+    }
+    return batch(statements);
+  };
+  fake.playwright.connect = async () => { throw new Error('Browser session not found'); };
+  assert.equal((await collector.getLoginSession(env, login.session_id)).status, 'authenticated');
+  assert.equal((await new SessionStore(env).get(login.session_id)).status, 'authenticated');
+});
+
+test('a poll operation interrupted by successful confirmation returns authenticated state', async t => {
+  const env = environment(t);
+  const fake = browserDouble();
+  const collector = createCollector({ playwright: fake.playwright });
+  const login = await collector.createLoginSession(env);
+  const context = (await fake.playwright.connect()).contexts()[0];
+  fake.setUrl('https://mp.weixin.qq.com/cgi-bin/home?token=123456');
+  context.newCDPSession = async () => ({ send: async () => {
+    await collector.finishLoginSession(env, login.session_id);
+    throw new Error('Target closed after confirmation');
+  } });
+  assert.equal((await collector.getLoginSession(env, login.session_id)).status, 'authenticated');
+  assert.equal((await new SessionStore(env).get(login.session_id)).status, 'authenticated');
 });

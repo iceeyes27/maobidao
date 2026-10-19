@@ -40,6 +40,8 @@ npm run dev
 
 本地配置只使用测试密码，不能提交到仓库；脚本不会覆盖既有 `.dev.vars`。旧文章导入工具只生成 SQL，不执行远端操作，且可重复导入。旧文章 ID、访问地址、正文静态资源和 `STATS_KV` 阅读统计保留。
 
+扫码使用可重连的浏览器默认上下文，断开管理请求不会销毁验证页。文章验证所需的 Cookie、本地存储和 IndexedDB 均在进入原文前恢复；对应兼容代码固定于 Playwright 1.3.6，升级 SDK 时需核对 `src/archive/vendor/` 的来源与恢复测试。
+
 ### 云端部署
 
 所需资源在 `wrangler.toml` 中声明：`ARCHIVE_DB`、`ARCHIVE_BUCKET`、`ARCHIVE_BROWSER`、`ARCHIVE_EXECUTOR`、`ARCHIVE_WORKFLOW`、`ARCHIVE_SCHEDULER`。保留已有的 `SUBMIT_PASSWORD` 和统计配置。

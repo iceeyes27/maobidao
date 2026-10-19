@@ -140,10 +140,17 @@ export class SessionStore {
     return row;
   }
   async mark(id, status) {
-    await this.env.ARCHIVE_DB.prepare('UPDATE archive_login SET status = ? WHERE id = ?').bind(status, id).run();
-    if (['expired', 'failed', 'stale'].includes(status)) {
-      await this.env.ARCHIVE_DB.prepare('UPDATE archive_session SET active_login_id = NULL WHERE singleton = 1 AND active_login_id = ?').bind(id).run();
-    }
+    if (!['expired', 'failed', 'stale'].includes(status)) throw new CollectorError('LOGIN_STATE_INVALID', '扫码任务状态无效');
+    const results = await this.env.ARCHIVE_DB.batch([
+      this.env.ARCHIVE_DB.prepare("UPDATE archive_login SET status = ? WHERE id = ? AND status IN ('creating','waiting')")
+        .bind(status, id),
+      // An old poll cannot expire a completed login or release a newer task.
+      // This also repairs an interrupted release of an already expired task.
+      this.env.ARCHIVE_DB.prepare(`UPDATE archive_session SET active_login_id = NULL WHERE singleton = 1 AND active_login_id = ?
+        AND EXISTS (SELECT 1 FROM archive_login WHERE id = ? AND status IN ('expired','failed','stale'))`)
+        .bind(id, id),
+    ]);
+    return changed(results[0]);
   }
   async save(storageState, expectedVersion, loginId = null) {
     await this.ready();

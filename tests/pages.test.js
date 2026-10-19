@@ -102,7 +102,7 @@ test("not-found page has a usable home link", () => {
   assert.equal(escapeHtml('&<>"\''), "&amp;&lt;&gt;&quot;&#39;");
 });
 
-async function adminHarness({ loggedIn = true, configured = true, failHistoryOnce = false, jobs = [], scheduler = null, detailPages = null, sourceNotice = null } = {}) {
+async function adminHarness({ loggedIn = true, configured = true, failHistoryOnce = false, jobs = [], scheduler = null, detailPages = null, sourceNotice = null, fetchOverride = null } = {}) {
   class Node {
     constructor() { this.children = []; this.events = {}; this.value = ""; this.hidden = false; this.disabled = false; this.textContent = ""; }
     addEventListener(name, callback) { this.events[name] = callback; }
@@ -123,6 +123,8 @@ async function adminHarness({ loggedIn = true, configured = true, failHistoryOnc
   const status = { configured, login: { status: "saved" }, sources: [{ id: "source-1", name: "测试公众号", enabled: true }], jobs, scheduler };
   const fetch = async (path, options = {}) => {
     requests.push({ path, ...options });
+    const override = await fetchOverride?.(path, options);
+    if (override !== undefined) return override;
     if (path === "/api/admin/jobs" && failHistoryOnce) { failHistoryOnce = false; throw new Error("Network interrupted"); }
     if (path === "/api/admin/login") loggedIn = true;
     const authorized = path === "/api/admin/login" || loggedIn;
@@ -285,4 +287,113 @@ test("admin explains why an added source remains disabled for automatic monitori
   await findNode(admin.get("source-results"), "添加公众号").events.click();
   assert.equal(admin.get("source-message").textContent, notice);
   assert.equal(admin.requests.filter((request) => request.path === "/api/admin/sources" && request.method === "POST").length, 1);
+});
+
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((done, fail) => { resolve = done; reject = fail; });
+  return { promise, resolve, reject };
+}
+
+const apiResponse = (data, status = 200) => ({ ok: status < 400, status, json: async () => data });
+const loginSession = (id) => ({ session_id: id, status: "waiting", purpose: "account",
+  screenshot_url: `/api/admin/wechat/login/${id}/screenshot` });
+async function openWechat(admin) {
+  const button = admin.get("wechat-login-button");
+  return button.events.click({ currentTarget: button });
+}
+
+for (const lateResult of ["stale", "server-error", "network-error"]) {
+  test(`a late ${lateResult} response for login A cannot change the newer login B`, async () => {
+    const oldPoll = deferred();
+    let created = 0;
+    const admin = await adminHarness({ fetchOverride: (path, options) => {
+      if (path === "/api/admin/wechat/login" && options.method === "POST") return apiResponse(loginSession(++created === 1 ? "A" : "B"));
+      if (path === "/api/admin/wechat/login/A") return oldPoll.promise;
+    } });
+    await openWechat(admin);
+    const refreshing = admin.get("refresh-button").events.click();
+    await admin.settle();
+    assert.ok(admin.requests.some((request) => request.path === "/api/admin/wechat/login/A"));
+    await openWechat(admin);
+    const before = admin.get("wechat-message").textContent;
+    if (lateResult === "network-error") oldPoll.reject(new Error("Old request disconnected"));
+    else oldPoll.resolve(lateResult === "stale"
+      ? apiResponse({ status: "stale", expires_at: 1, screenshot_url: "/api/admin/wechat/login/A/screenshot" }) : apiResponse({ error: "Old request failed" }, 500));
+    await refreshing;
+    assert.equal(admin.get("wechat-message").textContent, before);
+    assert.equal(admin.get("wechat-screenshot").hidden, false);
+    assert.match(admin.get("wechat-screenshot").src, /\/B\/screenshot\?/);
+    assert.equal(admin.get("page-message").textContent, "");
+  });
+}
+
+test("a late successful confirmation of login A cannot confirm a newly opened login B", async () => {
+  const oldFinish = deferred();
+  let created = 0;
+  const admin = await adminHarness({ fetchOverride: (path, options) => {
+    if (path === "/api/admin/wechat/login" && options.method === "POST") return apiResponse(loginSession(++created === 1 ? "A" : "B"));
+    if (path === "/api/admin/wechat/login/A/finish") return oldFinish.promise;
+  } });
+  await openWechat(admin);
+  const button = admin.get("wechat-finish-button");
+  const finishing = button.events.click({ currentTarget: button });
+  await admin.settle();
+  await openWechat(admin);
+  oldFinish.resolve(apiResponse({ authenticated: true, version: 1, purpose: "account" }));
+  await finishing;
+  assert.ok(admin.get("wechat-message").textContent.includes("请打开登录页面"));
+  assert.match(admin.get("wechat-screenshot").src, /\/B\/screenshot\?/);
+  assert.equal(admin.get("wechat-finish-button").hidden, false);
+});
+
+for (const lateStatus of ["waiting", "expired"]) {
+  test(`a poll started before successful confirmation cannot apply its late ${lateStatus} response`, async () => {
+    const oldPoll = deferred();
+    const admin = await adminHarness({ fetchOverride: (path, options) => {
+      if (path === "/api/admin/wechat/login" && options.method === "POST") return apiResponse(loginSession("A"));
+      if (path === "/api/admin/wechat/login/A") return oldPoll.promise;
+      if (path === "/api/admin/wechat/login/A/finish") return apiResponse({ authenticated: true, version: 1, purpose: "account" });
+    } });
+    await openWechat(admin);
+    const refreshing = admin.get("refresh-button").events.click();
+    await admin.settle();
+    const button = admin.get("wechat-finish-button");
+    await button.events.click({ currentTarget: button });
+    const message = admin.get("wechat-message");
+    assert.equal(message.textContent, "微信已登录，可以继续获取文章。");
+    // The completed view must not be rendered again by an obsolete request.
+    let lateWrites = 0;
+    let text = message.textContent;
+    Object.defineProperty(message, "textContent", {
+      get: () => text, set: (value) => { lateWrites++; text = value; }, configurable: true,
+    });
+    oldPoll.resolve(apiResponse({ status: lateStatus, expires_at: 1, screenshot_url: "/api/admin/wechat/login/A/screenshot" }));
+    await refreshing;
+    assert.equal(message.textContent, "微信已登录，可以继续获取文章。");
+    assert.equal(lateWrites, 0);
+    assert.equal(admin.get("wechat-finish-button").hidden, true);
+    assert.equal(admin.get("wechat-screenshot").hidden, true);
+  });
+}
+
+test("the latest login creation wins even when an earlier creation responds last", async () => {
+  const oldStart = deferred();
+  const job = { id: "verify-job", kind: "manual", status: "waiting_auth" };
+  const admin = await adminHarness({ jobs: [job], detailPages: {
+    0: { items: [{ title: "待验证文章", status: "pending", url: "https://mp.weixin.qq.com/s/article" }] },
+  }, fetchOverride: (path, options) => {
+    if (path === "/api/admin/wechat/login" && options.method === "POST") {
+      return JSON.parse(options.body).url ? apiResponse({ ...loginSession("B"), purpose: "article" }) : oldStart.promise;
+    }
+  } });
+  await findNode(admin.get("jobs-list"), "查看详情").events.click();
+  const first = openWechat(admin);
+  await admin.settle();
+  await findNode(admin.get("job-detail"), "处理文章验证").events.click();
+  oldStart.resolve(apiResponse(loginSession("A")));
+  await first;
+  assert.ok(admin.get("wechat-message").textContent.includes("完成微信要求的验证"));
+  assert.match(admin.get("wechat-screenshot").src, /\/B\/screenshot\?/);
 });

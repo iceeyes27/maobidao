@@ -2,7 +2,7 @@
   "use strict";
 
   const $ = (id) => document.getElementById(id);
-  const state = { authenticated: false, configured: null, version: 0, sources: [], jobs: [], detailId: null, detailOffset: 0, session: null, refreshing: false, timer: null, submissions: {} };
+  const state = { authenticated: false, configured: null, version: 0, sessionVersion: 0, sources: [], jobs: [], detailId: null, detailOffset: 0, session: null, refreshing: false, timer: null, submissions: {} };
   const labels = {
     queued: "等待开始", pending: "等待处理", pending_dispatch: "等待开始", running: "进行中", scanning: "正在查找文章",
     capturing: "正在获取文章", publishing: "正在更新网站", captured: "文章已完整保存", published: "网站已更新",
@@ -33,6 +33,18 @@
     return String(value || "操作未完成，请稍后重试。").replace(/^[A-Z][A-Z0-9_]{1,80}:\s*/, "");
   }
 
+  const sessionId = (session) => session?.session_id || session?.id;
+  const sessionReady = (session) => session?.authenticated === true
+    || ["ready", "authenticated", "logged_in", "completed"].includes(session?.status);
+  const sessionScope = (id) => ({ version: state.version, sessionVersion: state.sessionVersion, id });
+  const currentSession = (scope) => scope.version === state.version && scope.sessionVersion === state.sessionVersion
+    && (scope.id === undefined || scope.id === sessionId(state.session));
+  const relevantError = (error) => !error.sessionScope || currentSession(error.sessionScope);
+  function scopedError(error, scope) {
+    error.sessionScope = scope;
+    return error;
+  }
+
   function submissionKey(kind, payload) {
     const fingerprint = JSON.stringify(payload);
     if (state.submissions[kind]?.fingerprint !== fingerprint) state.submissions[kind] = { fingerprint, key: crypto.randomUUID() };
@@ -52,6 +64,7 @@
 
   function showLogin(text = "") {
     state.version += 1;
+    state.sessionVersion += 1;
     state.authenticated = false;
     state.configured = null;
     state.session = null;
@@ -82,12 +95,12 @@
     let data;
     try { data = await response.json(); }
     catch { throw new Error("服务暂时无法使用，请稍后重试。"); }
+    if (version !== state.version) throw new Error("登录状态已变化，请重新操作。");
     if (response.status === 401 && path !== "/api/admin/login") showLogin(state.authenticated ? "登录已失效，请重新登录。" : "");
     if (!response.ok || data.success === false) {
       const reason = typeof data.error === "string" ? data.error : data.error?.message || data.message;
       throw new Error(readableError(reason));
     }
-    if (version !== state.version) throw new Error("登录状态已变化，请重新操作。");
     return data;
   }
 
@@ -110,7 +123,7 @@
     button.type = "button";
     button.requiresConfiguration = requiresConfiguration;
     button.disabled = requiresConfiguration && state.configured === false;
-    button.addEventListener("click", () => busy(button, action).catch((error) => message("page-message", error.message, false)));
+    button.addEventListener("click", () => busy(button, action).catch((error) => { if (relevantError(error)) message("page-message", error.message, false); }));
     return button;
   }
 
@@ -314,9 +327,11 @@
   function renderSession(session) {
     if (!session) return;
     if (session.authenticated === true) session = { ...session, status: "authenticated" };
+    if (sessionId(session) && sessionId(session) === sessionId(state.session)
+        && !sessionReady(state.session) && sessionReady(session)) state.sessionVersion += 1;
     state.session = session;
     $("wechat-session").hidden = false;
-    const good = ["ready", "authenticated", "logged_in", "completed"].includes(session.status);
+    const good = sessionReady(session);
     const article = session.purpose === "article";
     const expired = ["expired", "stale", "failed"].includes(session.status);
     let statusText;
@@ -340,17 +355,28 @@
   }
 
   async function loadSession() {
-    const sessionId = state.session?.session_id || state.session?.id;
-    if (!sessionId) return;
-    const version = state.version;
-    const data = await api(`/api/admin/wechat/login/${encodeURIComponent(sessionId)}`);
-    if (version === state.version) renderSession({ ...state.session, ...(data.session || data) });
+    const id = sessionId(state.session);
+    if (!id) return;
+    const scope = sessionScope(id);
+    try {
+      const data = await api(`/api/admin/wechat/login/${encodeURIComponent(id)}`);
+      const session = data.session || data;
+      if (!currentSession(scope) || sessionId(session) && sessionId(session) !== id) return;
+      renderSession({ ...state.session, ...session });
+    } catch (error) { throw scopedError(error, scope); }
   }
 
   async function startWechatLogin(options = {}) {
-    const data = await post("/api/admin/wechat/login", options);
-    renderSession(data.session || data);
-    $("wechat-session").scrollIntoView?.({ behavior: "smooth", block: "center" });
+    state.sessionVersion += 1;
+    const scope = sessionScope();
+    try {
+      const data = await post("/api/admin/wechat/login", options);
+      if (!currentSession(scope)) return;
+      const session = data.session || data;
+      if (!sessionId(session)) throw new Error("验证入口尚未准备好，请稍后重新打开。");
+      renderSession(session);
+      $("wechat-session").scrollIntoView?.({ behavior: "smooth", block: "center" });
+    } catch (error) { throw scopedError(error, scope); }
   }
 
   async function refresh() {
@@ -382,7 +408,7 @@
       renderJobs();
       if (!state.session && (data.login?.session_id || data.login?.id)) renderSession(data.login);
       const results = await Promise.allSettled([loadDetail(), loadSession()]);
-      const failure = results.find((result) => result.status === "rejected");
+      const failure = results.find((result) => result.status === "rejected" && relevantError(result.reason));
       if (failure && version === state.version) message("page-message", failure.reason.message, false);
     } catch (error) {
       if (version === state.version) message(state.authenticated ? "page-message" : "login-message", error.message, false);
@@ -493,7 +519,7 @@
 
   $("wechat-login-button").addEventListener("click", async (event) => {
     try { await busy(event.currentTarget, () => startWechatLogin()); }
-    catch (error) { message("page-message", error.message, false); }
+    catch (error) { if (relevantError(error)) message("page-message", error.message, false); }
   });
 
   $("scheduler-start-button").addEventListener("click", async (event) => {
@@ -507,15 +533,18 @@
   });
 
   $("wechat-finish-button").addEventListener("click", async (event) => {
-    const id = state.session?.session_id || state.session?.id;
+    const id = sessionId(state.session);
     if (!id) return;
+    const scope = sessionScope(id);
     try {
       await busy(event.currentTarget, async () => {
         const data = await post(`/api/admin/wechat/login/${encodeURIComponent(id)}/finish`);
-        renderSession({ ...state.session, ...(data.session || data) });
+        const session = data.session || data;
+        if (!currentSession(scope) || sessionId(session) && sessionId(session) !== id) return;
+        renderSession({ ...state.session, ...session });
         await refresh();
       });
-    } catch (error) { message("page-message", error.message, false); }
+    } catch (error) { if (currentSession(scope)) message("page-message", error.message, false); }
   });
 
   $("refresh-button").addEventListener("click", () => refresh());

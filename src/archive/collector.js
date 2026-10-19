@@ -1,6 +1,7 @@
 import { CollectorError, assertImage, classifyCollectorError, collectorDiagnostic, resolvePublicHost, safeFetch, validatePublicUrl } from './collector-security.js';
 import { SessionStore } from './collector-session.js';
 import { fetchImageResource, imageResourceId, IMAGE_LIMIT } from './resources.js';
+import { restoreLoginStorage } from './login-storage.js';
 
 export { CollectorError } from './collector-security.js';
 
@@ -400,16 +401,26 @@ export function createCollector({ playwright, fetchImpl = fetch, resolveHost, no
     try {
       const acquired = await lib.acquire(env.ARCHIVE_BROWSER, { keep_alive: 60000, guardrails: { allowedDomains: LOGIN_DOMAINS } });
       phase = 'connect';
-      browser = await lib.connect(env.ARCHIVE_BROWSER, acquired.sessionId);
+      browser = await lib.connect(env.ARCHIVE_BROWSER, { sessionId: acquired.sessionId, persistent: true });
       let storageState;
       if (purpose === 'article') {
         try { storageState = (await store.load()).storageState; }
         catch (error) { if (!['LOGIN_REQUIRED', 'LOGIN_EXPIRED'].includes(error.code)) throw error; }
       }
       phase = 'new_context';
-      const context = await browser.newContext({ storageState, serviceWorkers: 'block' });
+      // Incognito contexts are disposed when their creating CDP connection
+      // detaches. Human login must live in the browser's persistent default context.
+      const context = browser.contexts()[0];
+      if (!context) throw new CollectorError('LOGIN_EXPIRED', '云端验证环境尚未准备好，请重新打开');
+      await context.addInitScript(() => {
+        if (navigator.serviceWorker) navigator.serviceWorker.register = async () => {};
+      });
       phase = 'protect';
       routeStats = await protectOfficialContext(context);
+      if (storageState) {
+        phase = 'restore_state';
+        await restoreLoginStorage(context, storageState);
+      }
       phase = 'page';
       const page = await context.newPage();
       phase = 'goto';
@@ -433,15 +444,25 @@ export function createCollector({ playwright, fetchImpl = fetch, resolveHost, no
   }
   async function withLogin(env, sessionId, callback) {
     const store = new SessionStore(env, now);
+    const confirmation = value => ({ authenticated: true, version: value.version, status: 'authenticated', expires_at: value.expires_at, purpose: value.purpose });
+    const completedWhilePolling = async () => {
+      try {
+        const latest = await store.get(sessionId);
+        return latest.status === 'authenticated' ? confirmation(latest) : null;
+      } catch (error) {
+        if (['LOGIN_EXPIRED', 'LOGIN_STALE'].includes(error.code)) return null;
+        throw error;
+      }
+    };
     const row = await store.get(sessionId);
-    if (row.status === 'authenticated') return { authenticated: true, version: row.version, status: 'authenticated', expires_at: row.expires_at, purpose: row.purpose };
+    if (row.status === 'authenticated') return confirmation(row);
     if (row.status === 'creating') return { status: 'creating', expires_at: row.expires_at, purpose: row.purpose };
     const lib = await api(env);
     let browser;
     let selectedContext;
     let selectedPage;
     try {
-      browser = await lib.connect(env.ARCHIVE_BROWSER, row.browser_session_id);
+      browser = await lib.connect(env.ARCHIVE_BROWSER, { sessionId: row.browser_session_id, persistent: true });
       const selected = browser.contexts().flatMap(context => context.pages().map(page => ({ context, page })))
         .filter(({ page }) => { try { return new URL(page.url()).origin === MP_ORIGIN; } catch { return false; } }).at(-1);
       if (!selected) throw new CollectorError('LOGIN_EXPIRED', '云端扫码浏览器已关闭，请重新创建入口');
@@ -449,8 +470,12 @@ export function createCollector({ playwright, fetchImpl = fetch, resolveHost, no
       selectedPage = selected.page;
     } catch (error) {
       await close(browser);
+      const completed = await completedWhilePolling();
+      if (completed) return completed;
       if (error.code === 'LOGIN_EXPIRED' || /(?:session|browser).*(?:not found|expired|closed)|code:\s*404/i.test(String(error.message))) {
         await store.mark(row.id, 'expired');
+        const committed = await completedWhilePolling();
+        if (committed) return committed;
         throw new CollectorError('LOGIN_EXPIRED', '云端扫码浏览器已关闭，请重新创建入口');
       }
       throw asCollectorError(error);
@@ -458,7 +483,11 @@ export function createCollector({ playwright, fetchImpl = fetch, resolveHost, no
     try {
       await protectOfficialContext(selectedContext);
       return await callback({ browser, context: selectedContext, page: selectedPage, row, store });
-    } catch (error) { throw asCollectorError(error); }
+    } catch (error) {
+      const completed = await completedWhilePolling();
+      if (completed) return completed;
+      throw asCollectorError(error);
+    }
     finally { await close(browser); }
   }
   async function getLoginSession(env, sessionId) {
@@ -491,9 +520,17 @@ export function createCollector({ playwright, fetchImpl = fetch, resolveHost, no
     });
   }
   async function getLoginScreenshot(env, sessionId) {
-    const result = await withLogin(env, sessionId, async ({ page }) => new Response(await page.screenshot({ type: 'png' }), {
-      headers: { 'content-type': 'image/png', 'cache-control': 'no-store, private', 'x-content-type-options': 'nosniff' },
-    }));
+    const result = await withLogin(env, sessionId, async ({ page }) => {
+      await page.bringToFront();
+      return new Response(await page.screenshot({ type: 'png', timeout: 15000 }), {
+        headers: { 'content-type': 'image/png', 'cache-control': 'no-store, private', 'x-content-type-options': 'nosniff' },
+      });
+    });
+    if (result?.authenticated) {
+      const error = new CollectorError('LOGIN_ALREADY_AUTHENTICATED', '微信验证已完成，无需再次获取二维码');
+      error.status = 409;
+      throw error;
+    }
     if (!(result instanceof Response)) throw new CollectorError('LOGIN_STALE', '该扫码任务已结束或尚未准备好');
     return result;
   }
