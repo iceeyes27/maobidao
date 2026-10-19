@@ -2,6 +2,7 @@ import { CollectorError, assertImage, classifyCollectorError, collectorDiagnosti
 import { SessionStore } from './collector-session.js';
 import { fetchImageResource, imageResourceId, IMAGE_LIMIT } from './resources.js';
 import { restoreLoginStorage } from './login-storage.js';
+import { acquireBrowser, launchBrowser } from './browser-acquisition.js';
 
 export { CollectorError } from './collector-security.js';
 
@@ -156,7 +157,8 @@ function assertArticle(doc) {
 }
 
 /** Dependencies are injectable for deterministic tests; production uses the Cloudflare binding. */
-export function createCollector({ playwright, fetchImpl = fetch, resolveHost, now = () => Date.now() } = {}) {
+export function createCollector({ playwright, fetchImpl = fetch, resolveHost, now = () => Date.now(), sleep } = {}) {
+  const browserTiming = { now, ...(sleep ? { sleep } : {}) };
   async function protectOfficialContext(context, resolver = resolveHost || resolvePublicHost) {
     const checked = new Map();
     const stats = { allowed: 0, blocked: 0, failures: [] };
@@ -211,20 +213,30 @@ export function createCollector({ playwright, fetchImpl = fetch, resolveHost, no
     const saved = await store.load();
     const lib = await api(env);
     let browser;
+    let phase = 'acquire';
     try {
-      browser = await lib.launch(env.ARCHIVE_BROWSER, { guardrails: { allowedDomains: LOGIN_DOMAINS } });
+      browser = await launchBrowser(lib, env.ARCHIVE_BROWSER, { keep_alive: 60000, guardrails: { allowedDomains: LOGIN_DOMAINS } }, browserTiming);
+      phase = 'restore_state';
       const context = await browser.newContext({ storageState: saved.storageState, serviceWorkers: 'block' });
       await protectOfficialContext(context);
       const page = await context.newPage();
+      phase = 'navigate';
       await page.goto(MP_ORIGIN, { waitUntil: 'domcontentloaded', timeout: 30000 });
       await page.waitForURL(url => url.origin === MP_ORIGIN && /^\d+$/.test(url.searchParams.get('token') || ''), { timeout: 10000 }).catch(() => {});
+      phase = 'source_request';
       const result = await callback(page);
+      phase = 'save_state';
       const storageState = await context.storageState({ indexedDB: true });
       if (JSON.stringify(storageState) !== JSON.stringify(saved.storageState)) {
         await store.save(storageState, saved.version);
       }
       return result;
-    } catch (error) { throw asCollectorError(error); }
+    } catch (error) {
+      const classified = asCollectorError(error);
+      classified.phase ||= phase;
+      classified.diagnostic ||= collectorDiagnostic(error);
+      throw classified;
+    }
     finally { await close(browser); }
   }
   async function mpRequest(page, path, params) {
@@ -310,7 +322,7 @@ export function createCollector({ playwright, fetchImpl = fetch, resolveHost, no
     let browser;
     try {
       // Browser has no network access: SSRF checks and redirect handling happen in safeFetch.
-      browser = await lib.launch(env.ARCHIVE_BROWSER, { guardrails: { allowedDomains: [] } });
+      browser = await launchBrowser(lib, env.ARCHIVE_BROWSER, { keep_alive: 60000, guardrails: { allowedDomains: [] } }, browserTiming);
       const context = await browser.newContext({ javaScriptEnabled: false, serviceWorkers: 'block' });
       let page = await context.newPage();
       await page.route('**/*', route => route.abort());
@@ -329,7 +341,7 @@ export function createCollector({ playwright, fetchImpl = fetch, resolveHost, no
           throw error;
         }
         await close(browser);
-        browser = await lib.launch(env.ARCHIVE_BROWSER, { guardrails: { allowedDomains: LOGIN_DOMAINS } });
+        browser = await launchBrowser(lib, env.ARCHIVE_BROWSER, { keep_alive: 60000, guardrails: { allowedDomains: LOGIN_DOMAINS } }, browserTiming);
         authenticatedContext = await browser.newContext({ storageState: restored.storageState, serviceWorkers: 'block' });
         await protectOfficialContext(authenticatedContext, resolveCaptureHost);
         page = await authenticatedContext.newPage();
@@ -399,7 +411,7 @@ export function createCollector({ playwright, fetchImpl = fetch, resolveHost, no
     let phase = 'acquire';
     let routeStats;
     try {
-      const acquired = await lib.acquire(env.ARCHIVE_BROWSER, { keep_alive: 60000, guardrails: { allowedDomains: LOGIN_DOMAINS } });
+      const acquired = await acquireBrowser(lib, env.ARCHIVE_BROWSER, { keep_alive: 60000, guardrails: { allowedDomains: LOGIN_DOMAINS } }, browserTiming);
       phase = 'connect';
       browser = await lib.connect(env.ARCHIVE_BROWSER, { sessionId: acquired.sessionId, persistent: true });
       let storageState;
@@ -534,11 +546,36 @@ export function createCollector({ playwright, fetchImpl = fetch, resolveHost, no
     if (!(result instanceof Response)) throw new CollectorError('LOGIN_STALE', '该扫码任务已结束或尚未准备好');
     return result;
   }
-  return { searchSources, listSourceArticles, captureArticle, createLoginSession, getLoginSession, finishLoginSession, getLoginScreenshot };
+  async function getBrowserStatus(env) {
+    const lib = await api(env);
+    const limits = await lib.limits(env.ARCHIVE_BROWSER);
+    const history = typeof lib.history === 'function' ? await lib.history(env.ARCHIVE_BROWSER) : [];
+    const timestamp = now();
+    const dayStart = Math.floor(timestamp / 86400000) * 86400000;
+    const seen = new Set();
+    let recentSeconds = 0;
+    for (const session of history) {
+      if (seen.has(session.sessionId) || !Number.isFinite(session.startTime) || !Number.isFinite(session.endTime)) continue;
+      seen.add(session.sessionId);
+      recentSeconds += Math.max(0, Math.min(timestamp, session.endTime) - Math.max(dayStart, session.startTime)) / 1000;
+    }
+    // Operator diagnostics retain counts only; browser IDs and login data stay private.
+    const number = value => Number.isFinite(value) && value >= 0 ? value : null;
+    return {
+      active_sessions: Array.isArray(limits.activeSessions) ? limits.activeSessions.length : null,
+      max_concurrent_sessions: number(limits.maxConcurrentSessions),
+      allowed_acquisitions: number(limits.allowedBrowserAcquisitions),
+      next_acquisition_wait: number(limits.timeUntilNextAllowedBrowserAcquisition),
+      recent_history_entries: history.length,
+      recent_browser_seconds_today: Math.floor(recentSeconds),
+    };
+  }
+  return { searchSources, listSourceArticles, captureArticle, createLoginSession, getLoginSession, finishLoginSession, getLoginScreenshot, getBrowserStatus };
 }
 
 const collector = createCollector();
 export const searchSources = (...args) => collector.searchSources(...args);
+export const getBrowserStatus = (...args) => collector.getBrowserStatus(...args);
 export const listSourceArticles = (...args) => collector.listSourceArticles(...args);
 export const captureArticle = (...args) => collector.captureArticle(...args);
 export const createLoginSession = (...args) => collector.createLoginSession(...args);

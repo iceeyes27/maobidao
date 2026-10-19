@@ -7,6 +7,7 @@ import { fetchImageResource } from './resources.js';
 
 const OPERATIONS = new Map([
   ['searchSources', { call: collector.searchSources, minimum: 1, maximum: 1 }],
+  ['getBrowserStatus', { call: collector.getBrowserStatus, minimum: 0, maximum: 0 }],
   ['createLoginSession', { call: collector.createLoginSession, minimum: 0, maximum: 1 }],
   ['getLoginSession', { call: collector.getLoginSession, minimum: 1, maximum: 1 }],
   ['finishLoginSession', { call: collector.finishLoginSession, minimum: 1, maximum: 1 }],

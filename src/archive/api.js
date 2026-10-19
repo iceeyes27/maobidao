@@ -126,7 +126,7 @@ export async function handleAdmin(request, env) {
     requireMethod(request, "GET");
     const query = (url.searchParams.get("q") || "").trim();
     if (!query || query.length > 100) throw new ArchiveError("INVALID_QUERY", "请输入100字以内的公众号名称。");
-    const lease = await store.acquireLease("wechat-account", `search:${crypto.randomUUID()}`, 90_000);
+    const lease = await store.acquireLease("wechat-account", `search:${crypto.randomUUID()}`, 180_000);
     if (!lease) throw new ArchiveError("BUSY", "正在处理采集或登录，请稍后再搜索。", 409);
     try { return json({ sources: await collect(env, "searchSources", query) }); }
     finally { await store.releaseLease(lease); }
@@ -219,7 +219,7 @@ export async function handleAdmin(request, env) {
     const data = request.body ? await readJson(request, 4096) : {};
     const target = data.url ? publicUrl(data.url) : null;
     if (target && target.hostname !== "mp.weixin.qq.com") throw new ArchiveError("INVALID_URL", "验证入口只支持微信官方文章页面。");
-    const lease = await store.acquireLease("wechat-account", `login:${crypto.randomUUID()}`, 90_000);
+    const lease = await store.acquireLease("wechat-account", `login:${crypto.randomUUID()}`, 180_000);
     if (!lease) throw new ArchiveError("BUSY", "正在完成一篇采集，请稍后打开验证入口。", 409);
     try {
       const login = await collect(env, "createLoginSession", target ? { url: target.href } : {});

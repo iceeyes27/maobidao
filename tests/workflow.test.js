@@ -52,7 +52,7 @@ test('operator login preparation acquires and releases the same account lease wi
   assert.deepEqual(result, { state: 'waiting_auth', prepared: true });
   assert.deepEqual(calls.map(call => call.type), ['acquire', 'collector', 'release']);
   assert.equal(calls[0].resource, 'wechat-account');
-  assert.equal(calls[0].ttl, 90_000);
+  assert.equal(calls[0].ttl, 180_000);
   assert.match(calls[0].owner, /^prepare-login:/);
   assert.deepEqual(calls[1], { type: 'collector', name: 'wechat-account', operationName: 'createLoginSession', args: [] });
 });
@@ -90,6 +90,31 @@ test('operator lifecycle verification stops and releases its lease when reconnec
   assert.equal(calls.filter(call => call.type === 'collector').length, 2);
 });
 
+test('operator search verification repeats the real search and excludes account storage and identifiers', async t => {
+  const { calls, workflow, step } = fixture(t, { operation: async name => name === 'getBrowserStatus'
+    ? { ok: true, value: { active_sessions: 0 } }
+    : { ok: true, value: [{ name: 'Example', fakeid: 'private-fakeid', account_biz: 'private-biz' }] } });
+  const result = await workflow.run({ payload: { action: 'verify-search', query: 'Example', verify_repeat: true } }, step);
+  assert.deepEqual(result, { state: 'verified', before: { active_sessions: 0 }, searches: [
+    { count: 1, names: ['Example'] }, { count: 1, names: ['Example'] },
+  ] });
+  assert.doesNotMatch(JSON.stringify(result), /private-fakeid|private-biz/);
+  assert.deepEqual(calls.filter(call => call.operationName === 'searchSources').map(call => call.args), [['Example'], ['Example']]);
+  assert.equal(calls[0].ttl, 240_000);
+  assert.equal(calls.at(-1).type, 'release');
+});
+
+test('operator search verification reports a safe failure and always releases its lease', async t => {
+  const { calls, workflow, step } = fixture(t, { operation: async name => name === 'getBrowserStatus'
+    ? { ok: true, value: { active_sessions: 3 } }
+    : { ok: false, error: { code: 'BROWSER_BUSY', diagnostic: 'browser_concurrency', retry_at: 2000 } } });
+  assert.deepEqual(await workflow.run({ payload: { action: 'verify-search', query: 'Example' } }, step), {
+    state: 'failed', code: 'BROWSER_BUSY', phase: null, diagnostic: 'browser_concurrency', retry_at: 2000,
+    before: { active_sessions: 3 }, searches: [],
+  });
+  assert.equal(calls.at(-1).type, 'release');
+});
+
 test('operator login preparation does not contact a browser while the account lease is busy', async t => {
   const { calls, workflow, step } = fixture(t, { lease: null });
   assert.deepEqual(await workflow.run({ payload: { action: 'prepare-login' } }, step), { state: 'busy', prepared: false, code: 'BUSY' });
@@ -112,8 +137,8 @@ test('operator login preparation releases its lease when the RPC transport throw
   assert.equal(calls.at(-1).type, 'release');
 });
 
-for (const retryAt of [500, 2000]) {
-  test(`quota recovery ${retryAt < 1000 ? 'skips a past sleep' : 'sleeps until a future reset'} before continuing the same job`, async t => {
+for (const state of ['waiting_quota', 'waiting_browser']) for (const retryAt of [500, 2000]) {
+  test(`${state} recovery ${retryAt < 1000 ? 'skips a past sleep' : 'sleeps until a future reset'} before continuing the same job`, async t => {
     let now = 1000;
     t.mock.method(Date, 'now', () => now);
     const { workflow, env, step } = fixture(t);
@@ -121,7 +146,7 @@ for (const retryAt of [500, 2000]) {
     const sleeps = [];
     env.ARCHIVE_EXECUTOR = { getByName: name => ({ async runBatch(jobId) {
       calls.push({ name, jobId });
-      return calls.length === 1 ? { state: 'waiting_quota', retry_at: retryAt } : { state: 'completed', job_id: jobId };
+      return calls.length === 1 ? { state, retry_at: retryAt } : { state: 'completed', job_id: jobId };
     } }) };
     step.sleepUntil = async (name, timestamp) => {
       assert.ok(timestamp >= now, 'The cloud runtime rejects sleepUntil in the past');
@@ -132,7 +157,7 @@ for (const retryAt of [500, 2000]) {
     assert.deepEqual(result, { state: 'completed', job_id: 'same-job', dispatch_tick: null });
     assert.equal(calls.length, 2);
     assert.ok(calls.every(call => call.name === 'job:same-job' && call.jobId === 'same-job'));
-    assert.deepEqual(sleeps, retryAt < 1000 ? [] : [{ name: 'quota-reset-0', timestamp: retryAt }]);
+    assert.deepEqual(sleeps, retryAt < 1000 ? [] : [{ name: state === 'waiting_quota' ? 'quota-reset-0' : 'browser-ready-0', timestamp: retryAt }]);
   });
 }
 

@@ -322,6 +322,59 @@ test('restoring saved cookies never substitutes for verifying actual backend log
   assert.equal(fake.calls.closes, 1);
 });
 
+test('search waits for browser capacity without replacing the verified login', async t => {
+  const env = environment(t);
+  let clock = Date.parse('2026-10-19T06:00:00Z');
+  const store = new SessionStore(env, () => clock);
+  const login = await store.beginLogin();
+  const saved = { cookies: [], origins: [] };
+  await store.save(saved, 0, login.id);
+  const fake = browserDouble();
+  fake.setStorage(saved);
+  fake.setUrl('https://mp.weixin.qq.com/cgi-bin/home?token=123456');
+  let checks = 0;
+  const sleeps = [];
+  fake.playwright.limits = async () => ({ activeSessions: [], maxConcurrentSessions: 3,
+    allowedBrowserAcquisitions: ++checks === 1 ? 0 : 1, timeUntilNextAllowedBrowserAcquisition: checks === 1 ? 20 : 0 });
+  fake.calls.apiResponse = { status: 200, text: JSON.stringify({ base_resp: { ret: 0 }, list: [{ nickname: 'Example', fakeid: 'source' }] }) };
+  const collector = createCollector({ playwright: fake.playwright, resolveHost: noDns, now: () => clock,
+    sleep: async delay => { sleeps.push(delay); clock += delay; } });
+  assert.deepEqual(await collector.searchSources(env, 'Example'), [{ name: 'Example', fakeid: 'source' }]);
+  assert.ok(sleeps.length > 0);
+  assert.equal(fake.calls.launches.length, 1);
+  assert.equal(fake.calls.closes, 1);
+  assert.equal((await store.current()).version, 1);
+});
+
+test('operator browser status contains only capacity counts and no session identifiers', async () => {
+  const collector = createCollector({ playwright: { limits: async () => ({
+    activeSessions: [{ id: 'private-browser-id' }], maxConcurrentSessions: 3,
+    allowedBrowserAcquisitions: 0, timeUntilNextAllowedBrowserAcquisition: 17.5,
+  }) } });
+  const status = await collector.getBrowserStatus({ ARCHIVE_BROWSER: {} });
+  assert.deepEqual(status, { active_sessions: 1, max_concurrent_sessions: 3, allowed_acquisitions: 0, next_acquisition_wait: 17.5,
+    recent_history_entries: 0, recent_browser_seconds_today: 0 });
+  assert.doesNotMatch(JSON.stringify(status), /private-browser/);
+});
+
+test('recent browser history clips midnight, ignores duplicates and excludes invalid durations', async () => {
+  const timestamp = Date.parse('2026-10-19T00:10:00Z');
+  const dayStart = Date.parse('2026-10-19T00:00:00Z');
+  const session = { sessionId: 'private-history', startTime: dayStart - 60_000, endTime: dayStart + 20_000 };
+  const collector = createCollector({ now: () => timestamp, playwright: {
+    limits: async () => ({ activeSessions: [], maxConcurrentSessions: 4,
+      allowedBrowserAcquisitions: 1, timeUntilNextAllowedBrowserAcquisition: 0 }),
+    history: async () => [session, session,
+      { sessionId: 'old', startTime: dayStart - 120_000, endTime: dayStart - 60_000 },
+      { sessionId: 'invalid', startTime: dayStart, endTime: NaN },
+      { sessionId: 'future', startTime: dayStart + 30_000, endTime: timestamp + 60_000 }],
+  } });
+  const result = await collector.getBrowserStatus({ ARCHIVE_BROWSER: {} });
+  assert.equal(result.recent_history_entries, 5);
+  assert.equal(result.recent_browser_seconds_today, 590);
+  assert.doesNotMatch(JSON.stringify(result), /private-history|sessionId/);
+});
+
 test('article verification opens only official articles and cannot complete on a challenge shell', async t => {
   const env = environment(t);
   const fake = browserDouble(documentResult({ challenge: true }));
@@ -462,7 +515,7 @@ test('daily browser quota errors wait until the next UTC day without becoming ar
   assert.equal(error.quota, 'browser_time');
   assert.equal(error.retry_at, Date.parse('2026-10-21T00:00:00Z'));
   assert.equal(classifyCollectorError(error), error);
-  assert.equal(classifyCollectorError(new Error('Unable to connect to browser: code: 429: message: Too many concurrent browsers')).code, 'RATE_LIMITED');
+  assert.equal(classifyCollectorError(new Error('Unable to connect to browser: code: 429: message: Too many concurrent browsers')).code, 'BROWSER_BUSY');
 });
 
 test('capture preserves the browser quota classification from the actual SDK error shape', async () => {

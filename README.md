@@ -42,6 +42,8 @@ npm run dev
 
 扫码使用可重连的浏览器默认上下文，断开管理请求不会销毁验证页。文章验证所需的 Cookie、本地存储和 IndexedDB 均在进入原文前恢复；对应兼容代码固定于 Playwright 1.3.6，升级 SDK 时需核对 `src/archive/vendor/` 的来源与恢复测试。
 
+登录、搜索、分页和正文解析共用浏览器创建检查，遇临时容量限制会先等待，单次最多等待 30 秒。采集任务仍无法取得浏览器时保留同一篇和进度，稍后自动继续，不消耗文章失败次数；每日浏览器时长耗尽则按下一 UTC 日恢复。
+
 ### 云端部署
 
 所需资源在 `wrangler.toml` 中声明：`ARCHIVE_DB`、`ARCHIVE_BUCKET`、`ARCHIVE_BROWSER`、`ARCHIVE_EXECUTOR`、`ARCHIVE_WORKFLOW`、`ARCHIVE_SCHEDULER`。保留已有的 `SUBMIT_PASSWORD` 和统计配置。

@@ -130,7 +130,24 @@ export async function scheduledArchive(controller, env) {
           }
         }
         if (job.status === "cancelled" || job.status === "paused") continue;
-        if (Math.max(job.next_retry_at || 0, job.progress?.quota_wait_until || 0) > Date.now()) continue;
+        const now = Date.now();
+        const progress = job.progress || {};
+        if (Math.max(job.next_retry_at || 0, progress.quota_wait_until || 0) > now) {
+          const currentTick = progress.dispatch_window?.tick;
+          // A short browser wait must not discard the independently scheduled
+          // final check. Preserve the wait and let the existing Workflow or
+          // final dispatch relay consume this authorization after it expires.
+          if (window.final && window.tick === window.end
+              && progress.browser_wait_until > now
+              && !(progress.quota_wait_until > now)
+              && (!Number.isSafeInteger(currentTick) || currentTick <= window.tick)
+              && !progress.final_capture_used
+              && !(progress.final_poll_used && progress.final_poll_tick === window.tick)) {
+            await store.patchJobProgress(job.id, { dispatch_window: window });
+            await store.requestDispatch(job.id, "scheduled");
+          }
+          continue;
+        }
         const article = job.article_key ? await store.getArticleByKey(job.article_key) : null;
         if (article?.captured_at) {
           await store.completeDaily(source.id, window.date, { capture_completed_at: article.captured_at, status: "captured" });

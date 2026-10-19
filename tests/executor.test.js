@@ -5,7 +5,7 @@ import { test } from 'node:test';
 
 const mocks = {};
 globalThis.__archiveExecutorMocks = mocks;
-const names = ['searchSources', 'createLoginSession', 'getLoginSession', 'finishLoginSession', 'getLoginScreenshot'];
+const names = ['searchSources', 'getBrowserStatus', 'createLoginSession', 'getLoginSession', 'finishLoginSession', 'getLoginScreenshot'];
 const hooks = registerHooks({
   resolve(specifier, context, next) {
     if (specifier === 'cloudflare:workers') return { url: 'test:executor-cloudflare', shortCircuit: true };

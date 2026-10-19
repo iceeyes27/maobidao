@@ -30,8 +30,23 @@ export function classifyCollectorError(error, now = Date.now()) {
     quota.retry_at = (Math.floor(now / 86400000) + 1) * 86400000;
     return quota;
   }
-  if (Number(error?.status) === 429 || /\b(?:code|status)\s*:?\s*429\b|too many (?:requests|concurrent|browser)/i.test(message)) {
-    return new CollectorError('RATE_LIMITED', '云端浏览器暂时限制请求频率，请稍后重试', true);
+  const limited = Number(error?.status) === 429 || Number(error?.cause?.status) === 429
+    || /\b(?:code|status|http)(?:\s+code)?\s*:?\s*429\b|too many (?:requests|concurrent|browser)/i.test(message);
+  const concurrent = /too many (?:concurrent (?:browsers?|sessions?)|browsers?|browser (?:instances?|sessions?))|(?:maximum|max)\s+concurrent\s+(?:browsers?|sessions?)|concurrent\s+(?:browsers?|sessions?)\s+limit/i.test(message);
+  const acquisition = /unable to (?:create|acquire|launch) (?:a )?(?:new )?browser/i.test(message);
+  const acquisitionRate = /(?:new browser instances?|browser (?:instance )?(?:creation|acquisition))[^.\n]{0,60}(?:rate limit|too frequent|too quickly)/i.test(message);
+  if (concurrent || acquisitionRate || limited && acquisition) {
+    const busy = new CollectorError('BROWSER_BUSY', '云端浏览器暂时繁忙，请稍后重试', true);
+    busy.status = 429;
+    busy.quota = 'browser_capacity';
+    busy.retry_at = now + 20000;
+    busy.diagnostic = concurrent ? 'browser_capacity: concurrent_limit' : 'browser_capacity: acquisition_limit';
+    return busy;
+  }
+  if (limited) {
+    const limitedError = new CollectorError('RATE_LIMITED', '云端浏览器暂时无法处理请求，请稍后重试', true);
+    limitedError.status = 429;
+    return limitedError;
   }
   return new CollectorError('UPSTREAM_ERROR', '云端采集暂时失败，请稍后重试', true);
 }

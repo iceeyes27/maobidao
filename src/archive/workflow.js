@@ -4,11 +4,36 @@ import { ArchiveStore } from "./store.js";
 export class ArchiveWorkflow extends WorkflowEntrypoint {
   async run(event, step) {
     const store = new ArchiveStore(this.env.ARCHIVE_DB);
+    // This check uses the same account operation as the UI and never returns
+    // cookies, browser IDs, navigation URLs or saved account storage.
+    if (event.payload.action === "verify-search") {
+      return step.do("verify-search", { retries: { limit: 0, delay: "1 second" }, timeout: "3 minutes" }, async () => {
+        const lease = await store.acquireLease("wechat-account", `verify-search:${crypto.randomUUID()}`, 240_000);
+        if (!lease) return { state: "busy", code: "BUSY" };
+        try {
+          const executor = this.env.ARCHIVE_EXECUTOR.getByName("wechat-account");
+          const before = await executor.collectorOperation("getBrowserStatus", []);
+          if (event.payload.status_only === true) return before.ok ? { state: "checked", browser: before.value }
+            : { state: "failed", code: before.error.code };
+          const searches = [];
+          const count = event.payload.verify_repeat === true ? 2 : 1;
+          for (let attempt = 0; attempt < count; attempt++) {
+            const response = await executor.collectorOperation("searchSources", [event.payload.query]);
+            if (!response.ok) return {
+              state: "failed", code: response.error.code, phase: response.error.phase || null, diagnostic: response.error.diagnostic || null,
+              retry_at: response.error.retry_at || null, before: before.ok ? before.value : null, searches,
+            };
+            searches.push({ count: response.value.length, names: response.value.map(source => source.name) });
+          }
+          return { state: "verified", before: before.ok ? before.value : null, searches };
+        } finally { await store.releaseLease(lease); }
+      });
+    }
     // Operator-only Workflow invocation prepares the same protected login entry
     // used by the admin page, without exposing browser URLs in Workflow outputs.
     if (event.payload.action === "prepare-login") {
       return step.do("prepare-login", { retries: { limit: 0, delay: "1 second" }, timeout: "2 minutes" }, async () => {
-        const lease = await store.acquireLease("wechat-account", `prepare-login:${crypto.randomUUID()}`, 90_000);
+        const lease = await store.acquireLease("wechat-account", `prepare-login:${crypto.randomUUID()}`, 180_000);
         if (!lease) return { state: "busy", prepared: false, code: "BUSY" };
         try {
           const response = await this.env.ARCHIVE_EXECUTOR.getByName("wechat-account").collectorOperation("createLoginSession", []);
@@ -63,8 +88,9 @@ export class ArchiveWorkflow extends WorkflowEntrypoint {
       }
 
       if (["completed", "cancelled"].includes(result.state)) return result;
-      if (result.state === "waiting_quota") {
-        if (Date.now() < result.retry_at) await step.sleepUntil(`quota-reset-${batch}`, result.retry_at);
+      if (["waiting_quota", "waiting_browser"].includes(result.state)) {
+        const kind = result.state === "waiting_quota" ? "quota-reset" : "browser-ready";
+        if (Date.now() < result.retry_at) await step.sleepUntil(`${kind}-${batch}`, result.retry_at);
         continue;
       }
       if (["idle", "awaiting_window"].includes(result.state)) {
