@@ -1,4 +1,5 @@
 import { CollectorError, collectorDiagnostic } from './collector-security.js';
+import { summarizeBrowserUsage } from './browser-usage.js';
 
 const MAX_WAIT_MS = 30_000;
 const ACQUISITION_INTERVAL_MS = 20_000;
@@ -24,9 +25,32 @@ function creationBusy(error) {
   // launch() also connects after acquisition. Repeating a failed connection could
   // create another browser while the already acquired browser remains alive.
   if (/unable to connect to browser/i.test(message)) return false;
-  return error?.code === 'BROWSER_BUSY'
-    || Number(error?.status) === 429 || Number(error?.cause?.status) === 429
-    || /\b(?:code|status|http)(?:\s+code)?\s*:?\s*429\b/i.test(message);
+  return error?.code === 'BROWSER_BUSY' || creation429(error);
+}
+
+function creation429(error) {
+  return Number(error?.status) === 429 || Number(error?.cause?.status) === 429
+    || /\b(?:code|status|http)(?:\s+code)?\s*:?\s*429\b/i.test(`${error?.message || ''} ${error?.cause?.message || ''}`);
+}
+
+async function budgetExhausted(lib, binding, budgetSeconds, failedAt, now) {
+  if (!Number.isFinite(budgetSeconds) || budgetSeconds <= 0 || typeof lib.history !== 'function') return null;
+  let usage;
+  try {
+    const history = await lib.history(binding);
+    const checkedAt = now();
+    // A slow history response cannot carry yesterday's pause into a new UTC day.
+    if (Math.floor(checkedAt / 86_400_000) !== Math.floor(failedAt / 86_400_000)) return null;
+    usage = summarizeBrowserUsage(history, checkedAt);
+  }
+  catch { return null; }
+  if (usage.normalClosedSecondsToday < budgetSeconds) return null;
+  const error = new CollectorError('BROWSER_QUOTA_EXCEEDED', '本项目今日浏览器运行预算已达到暂停阈值，请在预算重置后重试');
+  error.status = 429;
+  error.quota = 'browser_budget';
+  error.retry_at = (Math.floor(failedAt / 86_400_000) + 1) * 86_400_000;
+  error.diagnostic = 'browser_budget: configured_daily_budget_reached';
+  return error;
 }
 
 function readCapacity(value, now) {
@@ -41,7 +65,7 @@ function readCapacity(value, now) {
   return value.allowedBrowserAcquisitions > 0 ? null : 'acquisition_limit';
 }
 
-async function createBrowser(lib, binding, method, options, { now = Date.now, sleep = defaultSleep } = {}) {
+async function createBrowser(lib, binding, method, options, { now = Date.now, sleep = defaultSleep, dailyBudgetSeconds } = {}) {
   const startedAt = now();
   let waited = 0;
   let reason = 'acquisition_limit';
@@ -55,6 +79,13 @@ async function createBrowser(lib, binding, method, options, { now = Date.now, sl
         return await lib[method](binding, options);
       } catch (error) {
         if (dailyQuota(error) || !creationBusy(error)) throw error;
+        // Evaluate the UTC day at this failure, not at the start of a request
+        // that may already have waited across midnight.
+        const failedAt = now();
+        if (creation429(error)) {
+          const exhausted = await budgetExhausted(lib, binding, dailyBudgetSeconds, failedAt, now);
+          if (exhausted) throw exhausted;
+        }
         reason = 'creation_429';
         providerDiagnostic = collectorDiagnostic(error);
       }

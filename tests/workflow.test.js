@@ -115,6 +115,48 @@ test('operator search verification reports a safe failure and always releases it
   assert.equal(calls.at(-1).type, 'release');
 });
 
+test('a scheduled operator search waits without holding the account lease and performs one search', async t => {
+  let clock = Date.parse('2026-10-19T06:00:00Z');
+  const notBefore = Date.parse('2026-10-20T00:00:00Z');
+  t.mock.method(Date, 'now', () => clock);
+  const { calls, workflow, step } = fixture(t, { operation: async name => name === 'getBrowserStatus'
+    ? { ok: true, value: { active_sessions: 0 } } : { ok: true, value: [{ name: 'Example' }] } });
+  step.sleepUntil = async (name, timestamp) => {
+    assert.equal(name, 'verify-search-scheduled');
+    assert.equal(timestamp, notBefore);
+    assert.deepEqual(calls, []);
+    clock = timestamp;
+  };
+  const result = await workflow.run({ payload: { action: 'verify-search', query: 'Example', not_before: notBefore } }, step);
+  assert.equal(result.state, 'verified');
+  assert.equal(calls.filter(call => call.operationName === 'searchSources').length, 1);
+  assert.equal(calls.at(-1).type, 'release');
+});
+
+test('a scheduled operator search expires after its target day without opening a browser', async t => {
+  const clock = Date.parse('2026-10-21T00:00:00Z');
+  t.mock.method(Date, 'now', () => clock);
+  const { calls, workflow, step } = fixture(t);
+  assert.deepEqual(await workflow.run({ payload: { action: 'verify-search', query: 'Example',
+    not_before: Date.parse('2026-10-20T00:00:00Z') } }, step), { state: 'expired', code: 'VERIFICATION_EXPIRED' });
+  assert.deepEqual(calls, []);
+});
+
+for (const code of ['BROWSER_QUOTA_EXCEEDED', 'BROWSER_BUSY', 'LOGIN_EXPIRED']) {
+  test(`a resumed operator search records ${code} without scheduling another day or another login`, async t => {
+    const clock = Date.parse('2026-10-20T00:01:00Z');
+    t.mock.method(Date, 'now', () => clock);
+    const { calls, workflow, step } = fixture(t, { operation: async name => name === 'getBrowserStatus'
+      ? { ok: true, value: {} } : { ok: false, error: { code, retry_at: clock + 86_400_000 } } });
+    step.sleepUntil = () => assert.fail('A resumed check cannot recursively wait for a later day');
+    const result = await workflow.run({ payload: { action: 'verify-search', query: 'Example',
+      not_before: Date.parse('2026-10-20T00:00:00Z') } }, step);
+    assert.equal(result.code, code);
+    assert.deepEqual(calls.filter(call => call.type === 'collector').map(call => call.operationName), ['getBrowserStatus', 'searchSources']);
+    assert.equal(calls.at(-1).type, 'release');
+  });
+}
+
 test('operator login preparation does not contact a browser while the account lease is busy', async t => {
   const { calls, workflow, step } = fixture(t, { lease: null });
   assert.deepEqual(await workflow.run({ payload: { action: 'prepare-login' } }, step), { state: 'busy', prepared: false, code: 'BUSY' });

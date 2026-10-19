@@ -289,6 +289,22 @@ test("admin explains why an added source remains disabled for automatic monitori
   assert.equal(admin.requests.filter((request) => request.path === "/api/admin/sources" && request.method === "POST").length, 1);
 });
 
+test("daily browser budget errors display the retry time without logging out or losing the search", async () => {
+  const retryAt = Date.parse("2030-01-02T00:00:00Z");
+  const admin = await adminHarness({ fetchOverride: async path => path.startsWith("/api/admin/sources/search?")
+    ? apiResponse({ success: false, code: "BROWSER_QUOTA_EXCEEDED", error: "Budget exhausted", retry_at: retryAt }, 429) : undefined });
+  admin.get("source-query").value = "Example";
+  await admin.submit("source-search-form");
+  const message = admin.get("source-message").textContent;
+  assert.match(message, /预算/);
+  assert.match(message, /2030\/01\/02.*08:00/);
+  assert.match(message, /北京时间/);
+  assert.match(message, /微信登录与任务进度已保留/);
+  assert.equal(admin.get("admin-content").hidden, false);
+  assert.equal(admin.get("source-query").value, "Example");
+  assert.equal(admin.requests.filter(request => request.path.startsWith("/api/admin/sources/search?")).length, 1);
+});
+
 function deferred() {
   let resolve;
   let reject;

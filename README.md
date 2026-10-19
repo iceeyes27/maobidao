@@ -44,6 +44,8 @@ npm run dev
 
 登录、搜索、分页和正文解析共用浏览器创建检查，遇临时容量限制会先等待，单次最多等待 30 秒。采集任务仍无法取得浏览器时保留同一篇和进度，稍后自动继续，不消耗文章失败次数；每日浏览器时长耗尽则按下一 UTC 日恢复。
 
+`ARCHIVE_BROWSER_DAILY_BUDGET_SECONDS` 默认部署值为 `600`。新建浏览器被拒绝后，仅当近期正常或空闲关闭的会话在当天 UTC 日期内已达到此预算，才暂停至下一个 UTC 日期；这项保守运行预算不是 Cloudflare 完整计费用量。无法核实的历史或基础设施失败会话不计入预算。调整套餐后应同步调整此值，`0` 表示停用项目预算检查。
+
 ### 云端部署
 
 所需资源在 `wrangler.toml` 中声明：`ARCHIVE_DB`、`ARCHIVE_BUCKET`、`ARCHIVE_BROWSER`、`ARCHIVE_EXECUTOR`、`ARCHIVE_WORKFLOW`、`ARCHIVE_SCHEDULER`。保留已有的 `SUBMIT_PASSWORD` 和统计配置。

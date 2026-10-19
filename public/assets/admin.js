@@ -99,7 +99,13 @@
     if (response.status === 401 && path !== "/api/admin/login") showLogin(state.authenticated ? "登录已失效，请重新登录。" : "");
     if (!response.ok || data.success === false) {
       const reason = typeof data.error === "string" ? data.error : data.error?.message || data.message;
-      throw new Error(readableError(reason));
+      const error = new Error(readableError(reason));
+      error.code = data.code;
+      error.retry_at = data.retry_at;
+      if (error.code === "BROWSER_QUOTA_EXCEEDED" && Number.isSafeInteger(error.retry_at) && error.retry_at > Date.now()) {
+        error.message = `今日浏览器运行预算已暂停使用，最早可于 ${formatDate(error.retry_at)}（北京时间）后重试。微信登录与任务进度已保留。`;
+      }
+      throw error;
     }
     return data;
   }

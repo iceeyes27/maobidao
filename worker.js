@@ -85,7 +85,10 @@ export default {
       const status = error.status || (error.code === "LOGIN_REQUIRED" || error.code === "LOGIN_EXPIRED" || error.code === "CHALLENGE_REQUIRED" ? 409 : 500);
       const safe = status < 500 || error.name === "CollectorError";
       console.warn(JSON.stringify({ event: "archive_request_error", code: error.code || "REQUEST_FAILED", status }));
-      return json({ success: false, code: error.code || "REQUEST_FAILED", error: safe ? error.message : "服务暂时不可用，请稍后重试。" }, status);
+      const retryAt = Number.isSafeInteger(error.retry_at) && error.retry_at > Date.now() ? error.retry_at : null;
+      return json({ success: false, code: error.code || "REQUEST_FAILED", error: safe ? error.message : "服务暂时不可用，请稍后重试。",
+        ...(retryAt ? { retry_at: retryAt } : {}),
+      }, status, retryAt ? { "Retry-After": String(Math.ceil((retryAt - Date.now()) / 1000)) } : {});
     }
   },
   async scheduled(controller, env) { await scheduledArchive(controller, env); },

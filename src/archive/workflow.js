@@ -7,27 +7,17 @@ export class ArchiveWorkflow extends WorkflowEntrypoint {
     // This check uses the same account operation as the UI and never returns
     // cookies, browser IDs, navigation URLs or saved account storage.
     if (event.payload.action === "verify-search") {
-      return step.do("verify-search", { retries: { limit: 0, delay: "1 second" }, timeout: "3 minutes" }, async () => {
-        const lease = await store.acquireLease("wechat-account", `verify-search:${crypto.randomUUID()}`, 240_000);
-        if (!lease) return { state: "busy", code: "BUSY" };
-        try {
-          const executor = this.env.ARCHIVE_EXECUTOR.getByName("wechat-account");
-          const before = await executor.collectorOperation("getBrowserStatus", []);
-          if (event.payload.status_only === true) return before.ok ? { state: "checked", browser: before.value }
-            : { state: "failed", code: before.error.code };
-          const searches = [];
-          const count = event.payload.verify_repeat === true ? 2 : 1;
-          for (let attempt = 0; attempt < count; attempt++) {
-            const response = await executor.collectorOperation("searchSources", [event.payload.query]);
-            if (!response.ok) return {
-              state: "failed", code: response.error.code, phase: response.error.phase || null, diagnostic: response.error.diagnostic || null,
-              retry_at: response.error.retry_at || null, before: before.ok ? before.value : null, searches,
-            };
-            searches.push({ count: response.value.length, names: response.value.map(source => source.name) });
-          }
-          return { state: "verified", before: before.ok ? before.value : null, searches };
-        } finally { await store.releaseLease(lease); }
-      });
+      const notBefore = event.payload.not_before;
+      if (notBefore !== undefined) {
+        if (!Number.isSafeInteger(notBefore) || notBefore <= 0 || notBefore > Date.now() + 86_400_000) {
+          return { state: "failed", code: "INVALID_VERIFICATION_TIME" };
+        }
+        if (Date.now() >= notBefore + 86_400_000) return { state: "expired", code: "VERIFICATION_EXPIRED" };
+        if (Date.now() < notBefore) await step.sleepUntil("verify-search-scheduled", notBefore);
+        if (Date.now() >= notBefore + 86_400_000) return { state: "expired", code: "VERIFICATION_EXPIRED" };
+      }
+      return step.do("verify-search", { retries: { limit: 0, delay: "1 second" }, timeout: "3 minutes" },
+        () => this.#verifySearch(store, event.payload));
     }
     // Operator-only Workflow invocation prepares the same protected login entry
     // used by the admin page, without exposing browser URLs in Workflow outputs.
@@ -57,6 +47,32 @@ export class ArchiveWorkflow extends WorkflowEntrypoint {
         } finally { await store.releaseLease(lease); }
       });
     }
+    return this.#runJob(store, event, step);
+  }
+
+  async #verifySearch(store, payload) {
+    const lease = await store.acquireLease("wechat-account", `verify-search:${crypto.randomUUID()}`, 240_000);
+    if (!lease) return { state: "busy", code: "BUSY" };
+    try {
+      const executor = this.env.ARCHIVE_EXECUTOR.getByName("wechat-account");
+      const before = await executor.collectorOperation("getBrowserStatus", []);
+      if (payload.status_only === true) return before.ok ? { state: "checked", browser: before.value }
+        : { state: "failed", code: before.error.code };
+      const searches = [];
+      const count = payload.verify_repeat === true ? 2 : 1;
+      for (let attempt = 0; attempt < count; attempt++) {
+        const response = await executor.collectorOperation("searchSources", [payload.query]);
+        if (!response.ok) return {
+          state: "failed", code: response.error.code, phase: response.error.phase || null, diagnostic: response.error.diagnostic || null,
+          retry_at: response.error.retry_at || null, before: before.ok ? before.value : null, searches,
+        };
+        searches.push({ count: response.value.length, names: response.value.map(source => source.name) });
+      }
+      return { state: "verified", before: before.ok ? before.value : null, searches };
+    } finally { await store.releaseLease(lease); }
+  }
+
+  async #runJob(store, event, step) {
     const jobId = event.payload.job_id;
     for (let batch = 0; batch < 20; batch++) {
       let result;

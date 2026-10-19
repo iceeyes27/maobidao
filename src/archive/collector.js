@@ -3,6 +3,7 @@ import { SessionStore } from './collector-session.js';
 import { fetchImageResource, imageResourceId, IMAGE_LIMIT } from './resources.js';
 import { restoreLoginStorage } from './login-storage.js';
 import { acquireBrowser, launchBrowser } from './browser-acquisition.js';
+import { summarizeBrowserUsage } from './browser-usage.js';
 
 export { CollectorError } from './collector-security.js';
 
@@ -158,7 +159,14 @@ function assertArticle(doc) {
 
 /** Dependencies are injectable for deterministic tests; production uses the Cloudflare binding. */
 export function createCollector({ playwright, fetchImpl = fetch, resolveHost, now = () => Date.now(), sleep } = {}) {
-  const browserTiming = { now, ...(sleep ? { sleep } : {}) };
+  const browserTiming = env => {
+    const configured = env.ARCHIVE_BROWSER_DAILY_BUDGET_SECONDS;
+    const dailyBudgetSeconds = configured === undefined ? 0 : Number(configured);
+    if (!Number.isFinite(dailyBudgetSeconds) || dailyBudgetSeconds < 0) {
+      throw new CollectorError('CONFIG_INVALID', '每日浏览器运行预算配置无效');
+    }
+    return { now, dailyBudgetSeconds, ...(sleep ? { sleep } : {}) };
+  };
   async function protectOfficialContext(context, resolver = resolveHost || resolvePublicHost) {
     const checked = new Map();
     const stats = { allowed: 0, blocked: 0, failures: [] };
@@ -215,7 +223,7 @@ export function createCollector({ playwright, fetchImpl = fetch, resolveHost, no
     let browser;
     let phase = 'acquire';
     try {
-      browser = await launchBrowser(lib, env.ARCHIVE_BROWSER, { keep_alive: 60000, guardrails: { allowedDomains: LOGIN_DOMAINS } }, browserTiming);
+      browser = await launchBrowser(lib, env.ARCHIVE_BROWSER, { keep_alive: 60000, guardrails: { allowedDomains: LOGIN_DOMAINS } }, browserTiming(env));
       phase = 'restore_state';
       const context = await browser.newContext({ storageState: saved.storageState, serviceWorkers: 'block' });
       await protectOfficialContext(context);
@@ -322,7 +330,7 @@ export function createCollector({ playwright, fetchImpl = fetch, resolveHost, no
     let browser;
     try {
       // Browser has no network access: SSRF checks and redirect handling happen in safeFetch.
-      browser = await launchBrowser(lib, env.ARCHIVE_BROWSER, { keep_alive: 60000, guardrails: { allowedDomains: [] } }, browserTiming);
+      browser = await launchBrowser(lib, env.ARCHIVE_BROWSER, { keep_alive: 60000, guardrails: { allowedDomains: [] } }, browserTiming(env));
       const context = await browser.newContext({ javaScriptEnabled: false, serviceWorkers: 'block' });
       let page = await context.newPage();
       await page.route('**/*', route => route.abort());
@@ -341,7 +349,7 @@ export function createCollector({ playwright, fetchImpl = fetch, resolveHost, no
           throw error;
         }
         await close(browser);
-        browser = await launchBrowser(lib, env.ARCHIVE_BROWSER, { keep_alive: 60000, guardrails: { allowedDomains: LOGIN_DOMAINS } }, browserTiming);
+        browser = await launchBrowser(lib, env.ARCHIVE_BROWSER, { keep_alive: 60000, guardrails: { allowedDomains: LOGIN_DOMAINS } }, browserTiming(env));
         authenticatedContext = await browser.newContext({ storageState: restored.storageState, serviceWorkers: 'block' });
         await protectOfficialContext(authenticatedContext, resolveCaptureHost);
         page = await authenticatedContext.newPage();
@@ -411,7 +419,7 @@ export function createCollector({ playwright, fetchImpl = fetch, resolveHost, no
     let phase = 'acquire';
     let routeStats;
     try {
-      const acquired = await acquireBrowser(lib, env.ARCHIVE_BROWSER, { keep_alive: 60000, guardrails: { allowedDomains: LOGIN_DOMAINS } }, browserTiming);
+      const acquired = await acquireBrowser(lib, env.ARCHIVE_BROWSER, { keep_alive: 60000, guardrails: { allowedDomains: LOGIN_DOMAINS } }, browserTiming(env));
       phase = 'connect';
       browser = await lib.connect(env.ARCHIVE_BROWSER, { sessionId: acquired.sessionId, persistent: true });
       let storageState;
@@ -550,15 +558,7 @@ export function createCollector({ playwright, fetchImpl = fetch, resolveHost, no
     const lib = await api(env);
     const limits = await lib.limits(env.ARCHIVE_BROWSER);
     const history = typeof lib.history === 'function' ? await lib.history(env.ARCHIVE_BROWSER) : [];
-    const timestamp = now();
-    const dayStart = Math.floor(timestamp / 86400000) * 86400000;
-    const seen = new Set();
-    let recentSeconds = 0;
-    for (const session of history) {
-      if (seen.has(session.sessionId) || !Number.isFinite(session.startTime) || !Number.isFinite(session.endTime)) continue;
-      seen.add(session.sessionId);
-      recentSeconds += Math.max(0, Math.min(timestamp, session.endTime) - Math.max(dayStart, session.startTime)) / 1000;
-    }
+    const usage = summarizeBrowserUsage(history, now());
     // Operator diagnostics retain counts only; browser IDs and login data stay private.
     const number = value => Number.isFinite(value) && value >= 0 ? value : null;
     return {
@@ -566,8 +566,8 @@ export function createCollector({ playwright, fetchImpl = fetch, resolveHost, no
       max_concurrent_sessions: number(limits.maxConcurrentSessions),
       allowed_acquisitions: number(limits.allowedBrowserAcquisitions),
       next_acquisition_wait: number(limits.timeUntilNextAllowedBrowserAcquisition),
-      recent_history_entries: history.length,
-      recent_browser_seconds_today: Math.floor(recentSeconds),
+      recent_history_entries: usage.entries,
+      recent_browser_seconds_today: Math.floor(usage.normalClosedSecondsToday),
     };
   }
   return { searchSources, listSourceArticles, captureArticle, createLoginSession, getLoginSession, finishLoginSession, getLoginScreenshot, getBrowserStatus };

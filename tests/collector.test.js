@@ -346,6 +346,29 @@ test('search waits for browser capacity without replacing the verified login', a
   assert.equal((await store.current()).version, 1);
 });
 
+test('a configured daily budget pauses a rejected search while preserving the verified login', async t => {
+  const env = environment(t);
+  env.ARCHIVE_BROWSER_DAILY_BUDGET_SECONDS = '600';
+  const clock = Date.parse('2026-10-19T06:00:00Z');
+  const store = new SessionStore(env, () => clock);
+  const login = await store.beginLogin();
+  await store.save({ cookies: [], origins: [] }, 0, login.id);
+  let launches = 0;
+  const collector = createCollector({ now: () => clock, sleep: () => assert.fail('Daily budget exhaustion must not keep retrying'),
+    playwright: {
+      limits: async () => ({ activeSessions: [], maxConcurrentSessions: 4,
+        allowedBrowserAcquisitions: 1, timeUntilNextAllowedBrowserAcquisition: 0 }),
+      launch: async () => { launches++; throw new Error('Unable to create new browser: code: 429: message: Rate limit exceeded'); },
+      history: async () => [{ sessionId: 'closed', closeReason: 1, closeReasonText: 'NormalClosure',
+        startTime: clock - 601_000, endTime: clock - 1000 }],
+    } });
+  await assert.rejects(collector.searchSources(env, 'Example'), error => error.code === 'BROWSER_QUOTA_EXCEEDED'
+    && error.status === 429 && error.quota === 'browser_budget' && error.retry_at === Date.parse('2026-10-20T00:00:00Z'));
+  assert.equal(launches, 1);
+  assert.equal((await store.current()).version, 1);
+  assert.equal((await store.load()).version, 1);
+});
+
 test('operator browser status contains only capacity counts and no session identifiers', async () => {
   const collector = createCollector({ playwright: { limits: async () => ({
     activeSessions: [{ id: 'private-browser-id' }], maxConcurrentSessions: 3,
@@ -360,18 +383,18 @@ test('operator browser status contains only capacity counts and no session ident
 test('recent browser history clips midnight, ignores duplicates and excludes invalid durations', async () => {
   const timestamp = Date.parse('2026-10-19T00:10:00Z');
   const dayStart = Date.parse('2026-10-19T00:00:00Z');
-  const session = { sessionId: 'private-history', startTime: dayStart - 60_000, endTime: dayStart + 20_000 };
+  const session = { sessionId: 'private-history', closeReason: 2, closeReasonText: 'BrowserIdle', startTime: dayStart - 60_000, endTime: dayStart + 20_000 };
   const collector = createCollector({ now: () => timestamp, playwright: {
     limits: async () => ({ activeSessions: [], maxConcurrentSessions: 4,
       allowedBrowserAcquisitions: 1, timeUntilNextAllowedBrowserAcquisition: 0 }),
     history: async () => [session, session,
-      { sessionId: 'old', startTime: dayStart - 120_000, endTime: dayStart - 60_000 },
-      { sessionId: 'invalid', startTime: dayStart, endTime: NaN },
-      { sessionId: 'future', startTime: dayStart + 30_000, endTime: timestamp + 60_000 }],
+      { sessionId: 'old', closeReason: 1, startTime: dayStart - 120_000, endTime: dayStart - 60_000 },
+      { sessionId: 'invalid', closeReason: 1, startTime: dayStart, endTime: NaN },
+      { sessionId: 'future', closeReason: 1, startTime: dayStart + 30_000, endTime: timestamp + 60_000 }],
   } });
   const result = await collector.getBrowserStatus({ ARCHIVE_BROWSER: {} });
   assert.equal(result.recent_history_entries, 5);
-  assert.equal(result.recent_browser_seconds_today, 590);
+  assert.equal(result.recent_browser_seconds_today, 20);
   assert.doesNotMatch(JSON.stringify(result), /private-history|sessionId/);
 });
 
