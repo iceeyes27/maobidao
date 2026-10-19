@@ -283,6 +283,7 @@ export function createCollector({ playwright, fetchImpl = fetch, resolveHost, no
     // https://github.com/rachelos/we-mp-rss/blob/main/core/wx/model/web.py
     const body = await wechatHttp.request(env, '/cgi-bin/appmsgpublish', {
       sub: 'list', sub_action: 'list_ex', begin: String(cursor), count: String(count), fakeid: source.fakeid,
+      search_field: 'null', query: '', type: '101_1', free_publish_type: '1',
     });
     const page = normalizeSourcePage(body, source, cursor, count);
     Object.defineProperty(page, 'transport', { value: 'http' });

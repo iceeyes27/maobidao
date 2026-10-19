@@ -5,6 +5,7 @@ import test from 'node:test';
 import { createWechatHttp } from '../src/archive/wechat-http.js';
 import { CollectorError } from '../src/archive/collector-security.js';
 import { SessionStore } from '../src/archive/collector-session.js';
+import { REQUEST_INTERVAL_MS, SOURCE_COOLDOWN_MS } from '../src/archive/wechat-throttle.js';
 
 const ORIGIN = 'https://mp.weixin.qq.com';
 const TIME = Date.parse('2026-10-19T01:00:00Z');
@@ -21,8 +22,8 @@ function fixture({ httpAuth = { token: '123456' }, storageState = state(), fetch
   const calls = [];
   let loads = 0;
   const transport = createWechatHttp({ now: () => TIME, resolveHost: async () => {},
-    throttleFactory: () => ({ reserve: async () => ({ next_allowed_at: TIME + 10_000 }),
-      cooldown: async () => ({ next_allowed_at: TIME + 60_000 }) }),
+    throttleFactory: () => ({ reserve: async () => ({ next_allowed_at: TIME + REQUEST_INTERVAL_MS }),
+      cooldown: async () => ({ next_allowed_at: TIME + SOURCE_COOLDOWN_MS }) }),
     fetchImpl: async (url, options) => { calls.push({ url, options }); return fetchImpl ? fetchImpl(url, options, calls.length) : json(); },
     sessionStoreFactory: () => ({ load: async () => { loads++; return structuredClone(saved); },
       save: async (...args) => { saves.push(args); return 1; } }),
@@ -72,6 +73,46 @@ test('HTML token recovery reads a bounded document without executing scripts', a
   assert.equal(target.searchParams.get('token'), '345678');
   assert.equal(target.searchParams.get('sub_action'), 'list_ex');
   assert.equal(target.searchParams.get('begin'), '5');
+});
+
+test('published article requests contain the exact fixed list profile including literal null and an empty query', async () => {
+  const profile = { sub: 'list', sub_action: 'list_ex', search_field: 'null', query: '', type: '101_1', free_publish_type: '1' };
+  // Older internal callers may omit fixed fields; the transport still supplies
+  // the complete published-list profile instead of forwarding arbitrary values.
+  for (const fixed of [profile, {}]) {
+    const f = fixture();
+    await f.transport.request({}, '/cgi-bin/appmsgpublish', Object.freeze({ ...fixed, fakeid: 'source/+=abc', begin: '5', count: '5' }));
+    assert.equal(f.calls.length, 1);
+    const target = new URL(f.calls[0].url);
+    assert.equal(target.origin, ORIGIN);
+    assert.equal(target.pathname, '/cgi-bin/appmsgpublish');
+    assert.deepEqual(Object.fromEntries(target.searchParams), {
+      begin: '5', count: '5', token: '123456', lang: 'zh_CN', f: 'json', ajax: '1', ...profile, fakeid: 'source/+=abc',
+    });
+    assert.equal([...target.searchParams].length, 13);
+    assert.ok(target.searchParams.has('query'));
+    assert.equal(target.searchParams.get('query'), '');
+    assert.match(target.search, /search_field=null/);
+    assert.match(target.search, /(?:[?&])query=(?:&|$)/);
+    assert.equal(f.calls[0].options.redirect, 'manual');
+    assert.equal(f.calls[0].options.headers.cookie, 'session=synthetic-cookie');
+  }
+});
+
+test('published list profile changes and unsupported fields are rejected before account state or requests', async () => {
+  for (const patch of [{ sub: 'search' }, { sub_action: 'list' }, { search_field: '7' }, { search_field: null },
+    { query: 'keyword' }, { type: '9' }, { type: 101 }, { free_publish_type: '0' }, { free_publish_type: 1 },
+    { token: 'injected' }, { lang: 'en_US' }, { ajax: '0' }, { action: 'list_ex' }, { scene: 'draft' }]) {
+    const f = fixture();
+    await assert.rejects(f.transport.request({}, '/cgi-bin/appmsgpublish', { fakeid: 'source', ...patch }), hasCode('INVALID_QUERY'));
+    assert.equal(f.loads(), 0);
+    assert.equal(f.calls.length, 0);
+    assert.equal(f.saves.length, 0);
+  }
+  const f = fixture();
+  await assert.rejects(f.transport.request({}, '/cgi-bin/searchbiz', { ...search, action: 'list_ex' }), hasCode('INVALID_QUERY'));
+  assert.equal(f.loads(), 0);
+  assert.equal(f.calls.length, 0);
 });
 
 test('a saved browser user agent is used consistently and retained when HTTP cookies rotate', async () => {
@@ -191,7 +232,7 @@ test('rate-limit diagnostics distinguish HTTP throttling from WeChat response co
     await assert.rejects(f.transport.request({}, '/cgi-bin/searchbiz', search), error => {
       assert.equal(error.code, 'RATE_LIMITED');
       assert.equal(error.status, 429);
-      assert.equal(error.retry_at, TIME + 60_000);
+      assert.equal(error.retry_at, TIME + SOURCE_COOLDOWN_MS);
       assert.equal(error.retryable, true);
       assert.equal(error.transport, 'http');
       assert.equal(error.phase, 'http_source');
@@ -284,7 +325,7 @@ test('search and article-list requests share their account interval across separ
   assert.equal(calls, 2);
 });
 
-test('confirmed WeChat throttling persists a sixty-second account cooldown that local retries cannot shorten', async t => {
+test('confirmed WeChat throttling persists fifteen minutes and repeated local retries never extend the deadline', async t => {
   const env = realEnvironment(t);
   let clock = TIME;
   const seed = new SessionStore(env, () => clock);
@@ -295,14 +336,18 @@ test('confirmed WeChat throttling persists a sixty-second account cooldown that 
     calls++;
     return calls === 1 ? json({ base_resp: { ret: 200013 } }) : json();
   } });
-  await assert.rejects(transport.request(env, '/cgi-bin/searchbiz', search), error => error.code === 'RATE_LIMITED' && error.retry_at === TIME + 60_000);
-  clock += 30_000;
-  await assert.rejects(transport.request(env, '/cgi-bin/searchbiz', search), error => {
-    assert.equal(error.diagnostic, 'wechat_http: local_cooldown');
-    return error.retry_at === TIME + 60_000;
-  });
-  assert.equal(calls, 1);
-  clock = TIME + 60_000;
+  const deadline = TIME + SOURCE_COOLDOWN_MS;
+  await assert.rejects(transport.request(env, '/cgi-bin/searchbiz', search), error => error.code === 'RATE_LIMITED' && error.retry_at === deadline);
+  for (const offset of [REQUEST_INTERVAL_MS, 60_000, SOURCE_COOLDOWN_MS - 1]) {
+    clock = TIME + offset;
+    await assert.rejects(transport.request(env, '/cgi-bin/searchbiz', search), error => {
+      assert.equal(error.diagnostic, 'wechat_http: local_cooldown');
+      return error.retry_at === deadline;
+    });
+    assert.equal(calls, 1);
+    assert.equal(env.ARCHIVE_DB.sqlite.prepare('SELECT next_allowed_at FROM archive_wechat_throttle WHERE singleton=1').get().next_allowed_at, deadline);
+  }
+  clock = deadline;
   await transport.request(env, '/cgi-bin/searchbiz', search);
   assert.equal(calls, 2);
 });

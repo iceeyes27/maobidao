@@ -13,6 +13,9 @@ const TOKEN = /^\d{1,32}$/;
 const DEFAULT_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 const COOKIE_NAME = /^[!#$%&'*+.^_`|~\da-z-]+$/i;
 const COOKIE_VALUE = /^[\x21\x23-\x2b\x2d-\x3a\x3c-\x5b\x5d-\x7e]*$/;
+const PUBLISHED_LIST = Object.freeze({
+  sub: 'list', sub_action: 'list_ex', search_field: 'null', query: '', type: '101_1', free_publish_type: '1',
+});
 
 const fail = (code, message, retryable = false) => { throw new CollectorError(code, message, retryable); };
 
@@ -26,7 +29,7 @@ function apiUrl(path, params, token) {
   const url = officialUrl(path);
   if (!params || typeof params !== 'object' || Array.isArray(params)) fail('INVALID_QUERY', '微信请求参数格式无效');
   const allowed = path === '/cgi-bin/searchbiz' ? ['action', 'begin', 'count', 'query']
-    : ['sub', 'sub_action', 'begin', 'count', 'fakeid'];
+    : ['begin', 'count', 'fakeid', ...Object.keys(PUBLISHED_LIST)];
   if (Object.keys(params).some(key => !allowed.includes(key))) fail('INVALID_QUERY', '微信请求包含不支持的参数');
   const begin = String(params.begin ?? 0);
   const count = String(params.count ?? (path === '/cgi-bin/searchbiz' ? 10 : 5));
@@ -34,11 +37,15 @@ function apiUrl(path, params, token) {
       || !/^\d+$/.test(count) || Number(count) < 1 || Number(count) > 20) fail('INVALID_QUERY', '微信分页参数无效');
   const values = { begin, count, token, lang: 'zh_CN', f: 'json', ajax: '1' };
   if (path === '/cgi-bin/searchbiz') {
+    if (params.action !== undefined && params.action !== 'search_biz') fail('INVALID_QUERY', '公众号搜索操作无效');
     if (typeof params.query !== 'string' || !params.query.trim() || params.query.length > 100) fail('INVALID_QUERY', '公众号搜索词须为 1 到 100 个字符');
     Object.assign(values, { action: 'search_biz', query: params.query });
   } else {
     if (typeof params.fakeid !== 'string' || !/^[\w=+/-]{1,256}$/.test(params.fakeid)) fail('INVALID_QUERY', '公众号标识无效');
-    Object.assign(values, { sub: 'list', sub_action: 'list_ex', fakeid: params.fakeid });
+    if (Object.entries(PUBLISHED_LIST).some(([name, value]) => params[name] !== undefined && params[name] !== value)) {
+      fail('INVALID_QUERY', '文章列表仅支持固定的已发表文章请求');
+    }
+    Object.assign(values, PUBLISHED_LIST, { fakeid: params.fakeid });
   }
   url.search = new URLSearchParams(values).toString();
   return officialUrl(url.href);

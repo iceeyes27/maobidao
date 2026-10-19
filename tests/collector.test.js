@@ -367,6 +367,37 @@ test('restoring saved cookies never substitutes for verifying actual backend log
   assert.equal(fake.calls.launches.length, 0);
 });
 
+test('direct source listing sends the complete published profile and preserves trusted source identity', async t => {
+  const env = environment(t);
+  const store = new SessionStore(env);
+  const login = await store.beginLogin();
+  await store.save({ cookies: [{ name: 'session', value: 'test-cookie', domain: 'mp.weixin.qq.com', path: '/' }], origins: [] }, 0, login.id, { token: '123456' });
+  const requests = [];
+  const collector = createCollector({ playwright: noBrowser, resolveHost: noDns, fetchImpl: async (url, options) => {
+    requests.push({ url, options });
+    return Response.json({ base_resp: { ret: 0 }, publish_page: JSON.stringify({ total_count: 6,
+      publish_list: [{ publish_info: JSON.stringify({ appmsgex: [{ aid: '123_2', title: 'Published article',
+        link: 'https://mp.weixin.qq.com/s?__biz=targetBiz&mid=123&idx=2', create_time: 1700000000 }] }) }],
+    }) });
+  } });
+  const page = await collector.listSourceArticles(env, { fakeid: 'synthetic-source', account_biz: 'targetBiz' }, { cursor: 5, count: 5 });
+  assert.equal(requests.length, 1);
+  const target = new URL(requests[0].url);
+  assert.equal(target.origin, 'https://mp.weixin.qq.com');
+  assert.equal(target.pathname, '/cgi-bin/appmsgpublish');
+  assert.deepEqual(Object.fromEntries(target.searchParams), {
+    begin: '5', count: '5', token: '123456', lang: 'zh_CN', f: 'json', ajax: '1', sub: 'list', sub_action: 'list_ex',
+    search_field: 'null', query: '', type: '101_1', free_publish_type: '1', fakeid: 'synthetic-source',
+  });
+  assert.equal(page.transport, 'http');
+  assert.equal(page.articles[0].source_key, 'wechat:targetBiz:123:2');
+  assert.equal(page.articles[0].time_trusted, true);
+  assert.equal(page.articles[0].published_at, 1700000000000);
+  assert.equal(page.next_cursor, 6);
+  assert.equal(page.has_more, false);
+  assert.equal(requests[0].options.redirect, 'manual');
+});
+
 test('direct search succeeds without browser capacity or replacing the verified login', async t => {
   const env = environment(t);
   let clock = Date.parse('2026-10-19T06:00:00Z');

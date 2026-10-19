@@ -1,7 +1,7 @@
 import { CollectorError } from './collector-security.js';
 
-const REQUEST_INTERVAL_MS = 10_000;
-const SOURCE_COOLDOWN_MS = 60_000;
+export const REQUEST_INTERVAL_MS = 10_000;
+export const SOURCE_COOLDOWN_MS = 15 * 60_000;
 
 function configurationError() {
   return new CollectorError('CONFIG_MISSING', '微信请求节流数据库尚未初始化，请执行数据库迁移');

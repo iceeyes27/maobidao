@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 import test from 'node:test';
-import { WechatThrottle } from '../src/archive/wechat-throttle.js';
+import { WechatThrottle, REQUEST_INTERVAL_MS, SOURCE_COOLDOWN_MS } from '../src/archive/wechat-throttle.js';
 import { CollectorError } from '../src/archive/collector-security.js';
 
 function database(t, migrate = true) {
@@ -43,17 +43,20 @@ test('atomic reservations allow only one winner across simultaneous executor ins
   assert.ok(blocked.every(result => result.reason.code === 'RATE_LIMITED' && result.reason.retry_at === 210_000));
 });
 
-test('an upstream rate limit extends the account wait to sixty seconds from its response time', async t => {
+test('an upstream rate limit extends the account wait to fifteen minutes from its response time', async t => {
   const db = database(t);
   let now = 300_000;
   const throttle = new WechatThrottle(db, () => now);
+  assert.equal(REQUEST_INTERVAL_MS, 10_000);
+  assert.equal(SOURCE_COOLDOWN_MS, 15 * 60_000);
   await throttle.reserve();
   now += 5_000;
-  assert.equal((await throttle.cooldown()).next_allowed_at, 365_000);
-  now = 364_999;
-  await assert.rejects(new WechatThrottle(db, () => now).reserve(), error => error.retry_at === 365_000);
-  now = 365_000;
-  assert.equal((await new WechatThrottle(db, () => now).reserve()).next_allowed_at, 375_000);
+  const deadline = now + SOURCE_COOLDOWN_MS;
+  assert.equal((await throttle.cooldown()).next_allowed_at, deadline);
+  now = deadline - 1;
+  await assert.rejects(new WechatThrottle(db, () => now).reserve(), error => error.retry_at === deadline);
+  now = deadline;
+  assert.equal((await new WechatThrottle(db, () => now).reserve()).next_allowed_at, deadline + REQUEST_INTERVAL_MS);
 });
 
 test('older or concurrent cooldown updates can never shorten an existing wait', async t => {
@@ -61,9 +64,9 @@ test('older or concurrent cooldown updates can never shorten an existing wait', 
   await new WechatThrottle(db, () => 500_000).cooldown();
   await new WechatThrottle(db, () => 400_000).cooldown();
   const results = await Promise.all([new WechatThrottle(db, () => 510_000).cooldown(), new WechatThrottle(db, () => 505_000).cooldown()]);
-  assert.ok(results.every(row => row.next_allowed_at === 570_000));
+  assert.ok(results.every(row => row.next_allowed_at === 510_000 + SOURCE_COOLDOWN_MS));
   const row = db.sqlite.prepare('SELECT * FROM archive_wechat_throttle WHERE singleton=1').get();
-  assert.equal(row.next_allowed_at, 570_000);
+  assert.equal(row.next_allowed_at, 510_000 + SOURCE_COOLDOWN_MS);
   assert.equal(row.updated_at, 510_000);
 });
 
@@ -101,5 +104,5 @@ test('reapplying the migration cannot reset an account cooldown', async t => {
   const db = database(t);
   await new WechatThrottle(db, () => 700_000).cooldown();
   db.sqlite.exec(readFileSync(new URL('../migrations/0004_wechat_throttle.sql', import.meta.url), 'utf8'));
-  await assert.rejects(new WechatThrottle(db, () => 700_001).reserve(), error => error.retry_at === 760_000);
+  await assert.rejects(new WechatThrottle(db, () => 700_001).reserve(), error => error.retry_at === 700_000 + SOURCE_COOLDOWN_MS);
 });
