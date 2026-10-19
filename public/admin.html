@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex,nofollow">
+  <title>文章管理 · 公开文章归档</title>
+  <link rel="stylesheet" href="/assets/style.css">
+  <link rel="stylesheet" href="/assets/admin.css">
+  <script src="/assets/admin.js" defer></script>
+</head>
+<body>
+  <main class="site admin-site">
+    <header class="site-header">
+      <div class="toolbar">
+        <h1 class="site-title">文章管理</h1>
+        <div class="toolbar-actions">
+          <a class="button secondary" href="/">查看网站</a>
+          <button id="logout-button" class="secondary" type="button" hidden>退出登录</button>
+        </div>
+      </div>
+      <p class="site-desc">管理公众号和文章。任务开始后，关闭此页面仍会继续执行。</p>
+    </header>
+    <p id="page-message" class="result" role="status" aria-live="polite"></p>
+    <section id="login-panel" class="panel">
+      <h2>管理员登录</h2>
+      <form id="login-form">
+        <label for="password">管理密码</label>
+        <input id="password" name="password" type="password" autocomplete="current-password" required>
+        <button type="submit">登录</button>
+        <p id="login-message" class="result" role="status" aria-live="polite"></p>
+      </form>
+    </section>
+    <div id="admin-content" hidden>
+      <section class="panel" aria-labelledby="automatic-title">
+        <h2 id="automatic-title">每日自动获取</h2>
+        <p>每天北京时间 21:30—23:30，每 5 分钟检查一次，每晚自动获取一篇该时段发布的新文章，完整获取后更新网站。</p>
+        <p class="help">同一时间只能启用一个公众号的自动获取；其他已添加公众号仍可获取历史文章。</p>
+        <p class="help">首次启用时已有文章不会自动补充。遇到未完成任务，下一晚先继续该篇。</p>
+        <div class="toolbar">
+          <p id="service-status" class="help"></p>
+          <button id="wechat-login-button" type="button">扫码登录微信</button>
+        </div>
+        <div class="toolbar">
+          <p id="scheduler-status" class="help" role="status" aria-live="polite">正在读取定时检查记录…</p>
+          <button id="scheduler-start-button" class="secondary" type="button">启动或恢复定时检查</button>
+        </div>
+        <div id="wechat-session" class="login-session" hidden>
+          <p id="wechat-message" role="status" aria-live="polite"></p>
+          <img id="wechat-screenshot" class="login-screenshot" alt="微信登录页面，请使用微信扫码" hidden>
+          <div class="toolbar-actions">
+            <a id="wechat-live-view" class="button secondary" target="_blank" rel="noopener noreferrer" hidden>打开登录页面</a>
+            <button id="wechat-finish-button" type="button">我已完成扫码，检查登录</button>
+          </div>
+          <p id="wechat-help" class="help">扫码后需要在微信中确认。登录结果以检查结果为准。</p>
+        </div>
+      </section>
+      <section class="panel" aria-labelledby="sources-title">
+        <h2 id="sources-title">来源公众号</h2>
+        <form id="source-search-form" class="search-form">
+          <label for="source-query">搜索公众号名称</label>
+          <div class="form-row">
+            <input id="source-query" type="search" maxlength="100" required placeholder="输入公众号名称">
+            <button type="submit">搜索</button>
+          </div>
+        </form>
+        <p id="source-message" class="result" role="status" aria-live="polite"></p>
+        <ul id="source-results" class="admin-list" aria-label="搜索结果"></ul>
+        <h3>已添加</h3>
+        <ul id="sources-list" class="admin-list"></ul>
+      </section>
+      <section class="panel" aria-labelledby="history-title">
+        <h2 id="history-title">获取历史文章</h2>
+        <p class="help">日期均为北京时间，包含结束日期当天。选择今天时，只处理本次开始前已发布的文章。已收录的文章会直接复用。</p>
+        <form id="history-form">
+          <label for="history-source">公众号</label>
+          <select id="history-source" name="source_id" required><option value="">请先添加公众号</option></select>
+          <div class="date-grid">
+            <div><label for="start-date">开始日期</label><input id="start-date" name="start_date" type="date" required></div>
+            <div><label for="end-date">结束日期（含当天）</label><input id="end-date" name="end_date" type="date" required></div>
+          </div>
+          <button type="submit">开始获取</button>
+          <p id="history-message" class="result" role="status" aria-live="polite"></p>
+        </form>
+      </section>
+      <section class="panel" aria-labelledby="links-title">
+        <h2 id="links-title">粘贴文章链接</h2>
+        <form id="links-form">
+          <label for="links">文章链接，每行一个，最多 50 条</label>
+          <textarea id="links" name="links" rows="5" required placeholder="https://mp.weixin.qq.com/s/…"></textarea>
+          <button type="submit">提交文章</button>
+          <p id="links-message" class="result" role="status" aria-live="polite"></p>
+        </form>
+      </section>
+      <section class="panel" aria-labelledby="jobs-title">
+        <div class="toolbar">
+          <h2 id="jobs-title">任务进度</h2>
+          <button id="refresh-button" class="secondary" type="button">刷新进度</button>
+        </div>
+        <p class="help">页面可见时每 5 秒更新。额度不足时保留进度，等待恢复。暂停或取消会停止尚未开始的项目，已开始的文章可能继续完成。</p>
+        <ul id="jobs-list" class="admin-list"></ul>
+        <section id="job-detail" class="job-detail" hidden aria-label="任务详情"></section>
+      </section>
+    </div>
+    <noscript><p class="result error">请开启浏览器脚本后使用文章管理。</p></noscript>
+  </main>
+</body>
+</html>

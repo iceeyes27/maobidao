@@ -1,17 +1,76 @@
 # 文章链接归档网站
 
-这是一个部署在 Cloudflare Pages 上的静态归档网站，用于保存用户手动提交的公开文章链接。静态页面由 Cloudflare Pages 在每次部署时运行 `scripts/wechat_to_site.py` 生成。
+当前运行方式为 **Cloudflare Workers + SQLite Durable Objects + Browser Run + Workflows + D1 + R2**。管理员可以配置公众号自动检查、按日期获取历史文章，也可以继续手动提交链接。新文章内容保存后直接由网站展示，不需要提交 Git 或重新部署代码。
+
+## 云端采集管理
+
+进入 `/admin`，使用原有提交管理密码登录。微信登录在管理页提供的云端浏览器中完成，登录数据加密保存；电脑和管理网页无需持续打开。
+
+- **自动检查**：北京时间每天 21:30–23:30，每 5 分钟检查一次，23:30 为最后一轮。仅选择原文首次发布时间在 `[21:30,23:30)` 内、且不属于首次配置基线的文章。只允许一个自动启用的来源；多个来源可以用于手动历史采集。
+- **每日一篇**：选定后固定同一篇，当晚更换来源或终止任务不会增加篇数。其他来源仍有未采完整的旧任务时，先完成或终止该任务再更换来源；新增公众号仍可用于历史采集。正文与全部图片保存成功后结束当天监控，网站发布失败只重试同篇。23:30 最后一轮可以完成首次采集，之后不发起新的检查或采集重试。
+- **跨日恢复**：未采完整的自动任务在下一窗口优先继续，该晚不再选择新文章。已经采全的文章允许在窗口外继续发布。
+- **历史范围**：起止日期使用北京时间，包含结束日；选择今天则截至任务创建时刻。范围创建后固定，暂停或隔日恢复不会扩大范围。单篇失败继续其他文章，分页失败保留原游标；部分失败不会显示全部完成。
+- **统一去重**：自动、历史和贴链接共用来源标识、正文及网站地址。手动任务不直接修改自动配额；自动选中已经完成的同篇文章时复用结果，不继续选择第二篇。
+- **登录失效**：任务进入待验证状态；管理员重新扫码或处理指定文章的官方验证后继续。保存的登录状态不代表微信永久认可登录。
+
+`ARCHIVE_ENABLED` 控制网站内容和提交接口是否切换到云端数据；`ARCHIVE_AUTO_ENABLED` 单独控制每日定时采集。首次部署先完成数据导入；未添加自动启用且已完成基线的来源时，不会自动采集。来源准备及账号验证通过后，按每日窗口运行。
+
+### 免费方案的定时运行
+
+项目使用 `ARCHIVE_SCHEDULER` 对应的独立 Workflow 保存定时进度，每 5 分钟唤醒一次，不配置 Cron Trigger。实例按 UTC 日期拆分，公众号文章的筛选窗口和管理页日期始终使用北京时间。运行时提前安排下一日实例；关闭电脑或管理网页不会停止已经启动的云端定时任务。
+
+部署流程负责首次启动。管理页显示最近成功检查时间；需要恢复时，登录后点击“启动或恢复定时检查”。这个操作使用受保护的 `POST /api/admin/scheduler/start`，重复操作复用当天实例。普通状态刷新只读记录，不会启动定时器或采集。迟到 5 分钟及以上的旧检查会跳过，不会在恢复后集中补跑；没有执行检查不能解释为公众号没有更新。
+
+此配置以 Workers Free 为前提，不要求升级 Workers Paid。Workflow 负责定时、持久等待和任务编排；SQLite Durable Object 执行图文处理及需要浏览器的管理操作，正文处理不放在 Workflow 的短 CPU 步骤内。免费额度仍有边界：Workflows 每日提供 3,000 个步骤；Browser Run 每日提供 10 分钟浏览器时间、最多 3 个并发浏览器。扫码、文章检查和采集共用浏览器额度，历史任务可能需要分多日完成。详见 [Workflows 限制](https://developers.cloudflare.com/workflows/reference/limits/)、[Workflows 计费](https://developers.cloudflare.com/workflows/reference/pricing/) 和 [Browser Run 免费额度](https://developers.cloudflare.com/browser-run/pricing/)。
+
+遇到可识别的额度不足，任务显示“等待额度恢复”，保存当前文章、分页位置及最早重试时间。恢复后继续原任务，自动任务不会因此改选第二篇；重试时间在管理页转换为北京时间。R2、D1、网站请求和存储也受各自账号额度约束。
+
+### 开发与验证
+
+```powershell
+npm ci
+npm test
+npm run check
+node scripts/configure-session-key.mjs --local
+npx wrangler d1 migrations apply ARCHIVE_DB --local
+node scripts/import-archive.mjs
+npx wrangler d1 execute ARCHIVE_DB --local --file .archive-import/legacy.sql
+npm run dev
+```
+
+本地配置只使用测试密码，不能提交到仓库；脚本不会覆盖既有 `.dev.vars`。旧文章导入工具只生成 SQL，不执行远端操作，且可重复导入。旧文章 ID、访问地址、正文静态资源和 `STATS_KV` 阅读统计保留。
+
+### 云端部署
+
+所需资源在 `wrangler.toml` 中声明：`ARCHIVE_DB`、`ARCHIVE_BUCKET`、`ARCHIVE_BROWSER`、`ARCHIVE_EXECUTOR`、`ARCHIVE_WORKFLOW`、`ARCHIVE_SCHEDULER`。保留已有的 `SUBMIT_PASSWORD` 和统计配置。
+
+```powershell
+npx wrangler login
+node scripts/configure-session-key.mjs
+npx wrangler d1 migrations apply ARCHIVE_DB --remote
+node scripts/import-archive.mjs
+npx wrangler d1 execute ARCHIVE_DB --remote --file .archive-import/legacy.sql
+npm run check
+npm run deploy
+```
+
+会话密钥脚本通过标准输入配置加密密钥，不显示密钥，并保留已存在的密钥。R2 需由账号先在 Cloudflare 控制台启用。正文和图片必须全部写入并校验后才标为公开可见；私有登录对象不能通过网站媒体接口读取。
+
+上线验收需要用真实账号确认：目标公众号搜索、历史分页、真实发布时间、正文及全部图片、扫码后恢复和重复发表防护。本期“发表”只指本网站可见，不包含公众号转载发表。Browser Run 的平台能力和单元测试不等于微信实号验收，CSS 背景图、音视频和附件不在当前图文采集范围内。
+
+下面保留原有静态归档脚本及接口的说明，供离线兼容和历史维护参考；云端新文章不经过该构建流程。
 
 ## 功能边界
 
 本项目用于归档用户提交的公开文章链接，**优先适配微信公众号文章**，也提供可选的本地监听导入脚本。
 
-不支持模拟微信登录。  
+旧静态模式不提供微信登录；云端扫码登录流程见上文。
+
 不支持抓取评论。  
 不支持抓取微信原文的阅读量、点赞数、在看数。  
 站内可选统计的是**本归档站自己的浏览量 / 阅读量**，不是微信官方原文数据。
 
-核心网站不会保存微信 Cookie、Token 或登录态。可选的本地监听脚本只读取本机配置文件，不会把登录态提交到 GitHub 或 Cloudflare。
+旧静态模式不会保存微信 Cookie、Token 或登录态。云端采集流程会加密保存登录状态；可选的本地监听脚本只读取本机配置文件，不会把登录态提交到 GitHub 或 Cloudflare。
 
 ## 目录结构
 

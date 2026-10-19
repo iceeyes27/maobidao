@@ -1,15 +1,20 @@
 name = "maobidao"
 main = "worker.js"
-compatibility_date = "2026-05-27"
+account_id = "8e74bee088fde4690a69c05eb8842036"
+compatibility_date = "2026-10-19"
+compatibility_flags = ["nodejs_compat"]
+upload_source_maps = true
 keep_vars = true
 
 [vars]
 GITHUB_OWNER = "iceeyes27"
 GITHUB_REPO = "maobidao"
 GITHUB_BRANCH = "main"
+ARCHIVE_ENABLED = "true"
+ARCHIVE_AUTO_ENABLED = "true"
 
 [secrets]
-required = ["GITHUB_TOKEN", "SUBMIT_PASSWORD"]
+required = ["ARCHIVE_SESSION_KEY", "SUBMIT_PASSWORD"]
 
 [[kv_namespaces]]
 binding = "STATS_KV"
@@ -19,3 +24,39 @@ preview_id = "c25b289b65284d0c8e7ba329dc0a4c12"
 [assets]
 directory = "./public"
 binding = "ASSETS"
+run_worker_first = ["/", "/index.html", "/articles/*", "/media/*", "/api/*", "/admin", "/admin.html"]
+
+[browser]
+binding = "ARCHIVE_BROWSER"
+
+[[d1_databases]]
+binding = "ARCHIVE_DB"
+database_name = "maobidao-archive"
+database_id = "7a98f5a1-f306-477f-9a7c-754f2ad1d576"
+migrations_dir = "migrations"
+
+[[r2_buckets]]
+binding = "ARCHIVE_BUCKET"
+bucket_name = "maobidao-archive"
+
+[[workflows]]
+name = "maobidao-archive"
+binding = "ARCHIVE_WORKFLOW"
+class_name = "ArchiveWorkflow"
+
+[[workflows]]
+name = "maobidao-scheduler"
+binding = "ARCHIVE_SCHEDULER"
+class_name = "ArchiveScheduler"
+
+[[durable_objects.bindings]]
+name = "ARCHIVE_EXECUTOR"
+class_name = "ArchiveExecutor"
+
+[[migrations]]
+tag = "archive-executor-v1"
+new_sqlite_classes = ["ArchiveExecutor"]
+
+[observability]
+enabled = true
+head_sampling_rate = 1
