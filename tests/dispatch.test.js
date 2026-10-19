@@ -3,8 +3,9 @@ import { readFileSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 import { test } from 'node:test';
 import { ArchiveStore } from '../src/archive/store.js';
-import { dispatchJob, dispatchPending, signalWaitingJobs } from '../src/archive/dispatch.js';
+import { dispatchJob, dispatchPending, scheduledArchive, signalWaitingJobs } from '../src/archive/dispatch.js';
 import { automaticWindow } from '../src/archive/core.js';
+import { runArchiveBatch } from '../src/archive/runner.js';
 
 class D1Adapter {
   constructor() {
@@ -49,6 +50,50 @@ test('a missing workflow thrown by get creates the fixed workflow ID', async t =
   assert.equal(await dispatchJob(env, job), true);
   assert.deepEqual(created, [{ id: job.workflow_id, params: { job_id: job.id } }]);
   assert.equal((await store.listPendingDispatch()).length, 0);
+});
+
+test('a source cooldown crossing 23:30 preserves the final authorization and consumes it only once', async t => {
+  const db = new D1Adapter();
+  t.after(() => db.sqlite.close());
+  db.sqlite.exec(readFileSync(new URL('../migrations/0002_admin_attempts.sql', import.meta.url), 'utf8'));
+  const store = new ArchiveStore(db);
+  const at = time => Date.parse(`2026-10-19T${time}+08:00`);
+  let clock = at('23:29:59');
+  t.mock.method(Date, 'now', () => clock);
+  const source = await store.initSource({ name: 'Synthetic', fakeid: 'synthetic' });
+  await store.completeBaseline(source.id, [], at('21:00:00'));
+  await store.updateSource(source.id, { enabled: true });
+  const job = await store.createJob({ kind: 'auto', source_id: source.id, monitor_date: '2026-10-19',
+    range_start: at('21:30:00'), range_end: at('23:30:00') });
+  await store.ensureDaily(source.id, job.monitor_date);
+  await db.prepare('UPDATE archive_daily_runs SET job_id=? WHERE source_id=? AND monitor_date=?')
+    .bind(job.id, source.id, job.monitor_date).run();
+  await store.scheduleJob(job.id, { ...automaticWindow(at('23:25:00')), tick: at('23:25:00') });
+  const outbox = await store.getDispatch(job.id);
+  await store.markDispatched(job.id, job.workflow_id, outbox.generation);
+  const env = { ARCHIVE_DB: db, ARCHIVE_BUCKET: {}, ARCHIVE_AUTO_ENABLED: 'true',
+    ARCHIVE_WORKFLOW: { get: async () => assert.fail('A source cooldown must not dispatch early') } };
+  let pages = 0;
+  const collector = { listSourceArticles: async () => {
+    if (++pages === 1) throw Object.assign(new Error('source temporarily limited'),
+      { code: 'RATE_LIMITED', retryable: true, retry_at: at('23:30:59') });
+    return { articles: [], next_cursor: 0, has_more: false };
+  } };
+  assert.equal((await runArchiveBatch(env, job.id, { collector })).state, 'waiting_source');
+  clock = at('23:30:00');
+  await scheduledArchive({ scheduledTime: clock }, env);
+  const saved = await store.getJob(job.id);
+  assert.equal(saved.progress.dispatch_window.tick, clock);
+  assert.equal(saved.progress.dispatch_window.final, true);
+  assert.equal(saved.progress.source_wait_until, at('23:30:59'));
+  assert.equal(saved.next_retry_at, at('23:30:59'));
+  assert.equal(saved.status, 'retrying');
+  assert.equal((await store.getDispatch(job.id)).generation, outbox.generation + 1);
+  clock = at('23:30:59');
+  assert.equal((await runArchiveBatch(env, job.id, { collector })).state, 'idle');
+  assert.equal((await runArchiveBatch(env, job.id, { collector })).state, 'awaiting_window');
+  assert.equal(pages, 2);
+  assert.equal((await store.getJob(job.id)).progress.final_poll_used, true);
 });
 
 test('ambiguous create failures retain outbox work and the next dispatch reuses the same instance', async t => {

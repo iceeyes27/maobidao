@@ -2,8 +2,11 @@ import { CollectorError, assertImage, classifyCollectorError, collectorDiagnosti
 import { SessionStore } from './collector-session.js';
 import { fetchImageResource, imageResourceId, IMAGE_LIMIT } from './resources.js';
 import { restoreLoginStorage } from './login-storage.js';
-import { acquireBrowser, launchBrowser } from './browser-acquisition.js';
+import { acquireBrowser } from './browser-acquisition.js';
 import { summarizeBrowserUsage } from './browser-usage.js';
+import { createWechatHttp } from './wechat-http.js';
+import { parseArticleHtml } from './article-parser.js';
+import { loadArticleVerification, saveArticleVerification } from './article-verification.js';
 
 export { CollectorError } from './collector-security.js';
 
@@ -158,7 +161,8 @@ function assertArticle(doc) {
 }
 
 /** Dependencies are injectable for deterministic tests; production uses the Cloudflare binding. */
-export function createCollector({ playwright, fetchImpl = fetch, resolveHost, now = () => Date.now(), sleep } = {}) {
+export function createCollector({ playwright, fetchImpl = fetch, resolveHost, now = () => Date.now(), sleep, httpClient } = {}) {
+  const wechatHttp = httpClient || createWechatHttp({ fetchImpl, resolveHost: resolveHost || resolvePublicHost, now });
   const browserTiming = env => {
     const configured = env.ARCHIVE_BROWSER_DAILY_BUDGET_SECONDS;
     const dailyBudgetSeconds = configured === undefined ? 0 : Number(configured);
@@ -216,37 +220,6 @@ export function createCollector({ playwright, fetchImpl = fetch, resolveHost, no
     catch { /* session can already have expired; its idle timeout also releases it */ }
     await close(browser);
   }
-  async function authenticatedPage(env, callback) {
-    const store = new SessionStore(env, now);
-    const saved = await store.load();
-    const lib = await api(env);
-    let browser;
-    let phase = 'acquire';
-    try {
-      browser = await launchBrowser(lib, env.ARCHIVE_BROWSER, { keep_alive: 60000, guardrails: { allowedDomains: LOGIN_DOMAINS } }, browserTiming(env));
-      phase = 'restore_state';
-      const context = await browser.newContext({ storageState: saved.storageState, serviceWorkers: 'block' });
-      await protectOfficialContext(context);
-      const page = await context.newPage();
-      phase = 'navigate';
-      await page.goto(MP_ORIGIN, { waitUntil: 'domcontentloaded', timeout: 30000 });
-      await page.waitForURL(url => url.origin === MP_ORIGIN && /^\d+$/.test(url.searchParams.get('token') || ''), { timeout: 10000 }).catch(() => {});
-      phase = 'source_request';
-      const result = await callback(page);
-      phase = 'save_state';
-      const storageState = await context.storageState({ indexedDB: true });
-      if (JSON.stringify(storageState) !== JSON.stringify(saved.storageState)) {
-        await store.save(storageState, saved.version);
-      }
-      return result;
-    } catch (error) {
-      const classified = asCollectorError(error);
-      classified.phase ||= phase;
-      classified.diagnostic ||= collectorDiagnostic(error);
-      throw classified;
-    }
-    finally { await close(browser); }
-  }
   async function mpRequest(page, path, params) {
     const token = new URL(page.url()).searchParams.get('token');
     if (!token || !/^\d+$/.test(token)) throw new CollectorError('LOGIN_EXPIRED', '公众号后台登录已失效，请重新扫码');
@@ -285,35 +258,35 @@ export function createCollector({ playwright, fetchImpl = fetch, resolveHost, no
     const image = response.value;
     const bytes = image?.bytes instanceof Uint8Array ? image.bytes
       : image?.bytes instanceof ArrayBuffer ? new Uint8Array(image.bytes) : null;
-    if (!bytes) throw new CollectorError('IMAGE_INCOMPLETE', '文章图片返回格式不完整');
+    if (!bytes || image.decoded !== true) throw new CollectorError('IMAGE_INCOMPLETE', '文章图片未通过完整解码校验');
     if (bytes.byteLength > IMAGE_LIMIT) throw new CollectorError('RESOURCE_TOO_LARGE', '文章图片超过允许大小');
     return { url: image.url, bytes, contentType: assertImage(bytes, image.contentType) };
   }
   async function searchSources(env, query) {
     const value = String(query || '').trim();
     if (!value || value.length > 100) throw new CollectorError('INVALID_QUERY', '公众号搜索词须为 1 到 100 个字符');
-    return authenticatedPage(env, async page => {
-      const body = await mpRequest(page, '/cgi-bin/searchbiz', { action: 'search_biz', begin: '0', count: '10', query: value });
-      if (!Array.isArray(body.list)) throw new CollectorError('SOURCE_FORMAT_CHANGED', '公众号搜索结果格式已变化');
-      return body.list.map(row => ({
-        name: String(row.nickname || row.name || ''), fakeid: String(row.fakeid || ''),
-        ...(row.biz ? { account_biz: String(row.biz) } : {}),
-        ...(row.round_head_img ? { avatar: String(row.round_head_img) } : {}),
-      })).filter(row => row.name && row.fakeid);
-    });
+    const body = await wechatHttp.request(env, '/cgi-bin/searchbiz', { action: 'search_biz', begin: '0', count: '10', query: value });
+    if (!Array.isArray(body.list)) throw new CollectorError('SOURCE_FORMAT_CHANGED', '公众号搜索结果格式已变化');
+    const sources = body.list.map(row => ({
+      name: String(row.nickname || row.name || ''), fakeid: String(row.fakeid || ''),
+      ...(row.biz ? { account_biz: String(row.biz) } : {}),
+      ...(row.round_head_img ? { avatar: String(row.round_head_img) } : {}),
+    })).filter(row => row.name && row.fakeid);
+    Object.defineProperty(sources, 'transport', { value: 'http' });
+    return sources;
   }
   async function listSourceArticles(env, source, { cursor = 0, count = 5 } = {}) {
     if (!source?.fakeid || !/^[\w=+/-]{1,256}$/.test(source.fakeid) || !Number.isSafeInteger(cursor) || cursor < 0 || !Number.isInteger(count) || count < 1 || count > 20) {
       throw new CollectorError('INVALID_QUERY', '公众号标识或分页参数无效');
     }
-    return authenticatedPage(env, async page => {
-      // This is WeRSS's published-list endpoint, not its draft/material endpoint.
-      // https://github.com/rachelos/we-mp-rss/blob/main/core/wx/model/web.py
-      const body = await mpRequest(page, '/cgi-bin/appmsgpublish', {
-        sub: 'list', sub_action: 'list_ex', begin: String(cursor), count: String(count), fakeid: source.fakeid,
-      });
-      return normalizeSourcePage(body, source, cursor, count);
+    // This is WeRSS's published-list endpoint, not its draft/material endpoint.
+    // https://github.com/rachelos/we-mp-rss/blob/main/core/wx/model/web.py
+    const body = await wechatHttp.request(env, '/cgi-bin/appmsgpublish', {
+      sub: 'list', sub_action: 'list_ex', begin: String(cursor), count: String(count), fakeid: source.fakeid,
     });
+    const page = normalizeSourcePage(body, source, cursor, count);
+    Object.defineProperty(page, 'transport', { value: 'http' });
+    return page;
   }
   async function captureArticle(env, article) {
     const url = validatePublicUrl(article?.url || '');
@@ -326,38 +299,22 @@ export function createCollector({ playwright, fetchImpl = fetch, resolveHost, no
     };
     const fetched = await safeFetch(url.href, { fetchImpl, resolveHost: resolveCaptureHost, maxBytes: HTML_LIMIT });
     if (!/^text\/html|^application\/xhtml\+xml/i.test(fetched.contentType)) throw new CollectorError('ARTICLE_INVALID', '链接未返回 HTML 文章');
-    const lib = await api(env);
-    let browser;
     try {
-      // Browser has no network access: SSRF checks and redirect handling happen in safeFetch.
-      browser = await launchBrowser(lib, env.ARCHIVE_BROWSER, { keep_alive: 60000, guardrails: { allowedDomains: [] } }, browserTiming(env));
-      const context = await browser.newContext({ javaScriptEnabled: false, serviceWorkers: 'block' });
-      let page = await context.newPage();
-      await page.route('**/*', route => route.abort());
-      await page.setContent(new TextDecoder().decode(fetched.bytes), { waitUntil: 'domcontentloaded', timeout: 15000 });
-      let doc = await page.evaluate(extractArticleDocument, {
+      let verifiedSnapshot = false;
+      let doc = parseArticleHtml(new TextDecoder().decode(fetched.bytes), {
         url: fetched.url, wechat: new URL(fetched.url).hostname === 'mp.weixin.qq.com',
       });
-      let restored;
-      let authenticatedContext;
-      if (!doc.removed && !doc.unsupported_background && new URL(fetched.url).hostname === 'mp.weixin.qq.com' && (doc.challenge || doc.invalid)) {
-        officialArticleUrl(fetched.url);
+      if (doc.challenge && !doc.removed && url.hostname === 'mp.weixin.qq.com') {
         const store = new SessionStore(env, now);
-        try { restored = await store.load(); }
-        catch (error) {
-          if (['LOGIN_REQUIRED', 'LOGIN_EXPIRED'].includes(error.code)) throw new CollectorError('CHALLENGE_REQUIRED', '请在管理员页面打开这篇微信文章并完成官方验证');
-          throw error;
+        try {
+          const saved = await store.load();
+          const verified = await loadArticleVerification(env, {
+            url: url.href, version: saved.version, loginId: store.loadedLoginId,
+          }, now());
+          if (verified) { doc = verified; verifiedSnapshot = true; }
+        } catch (error) {
+          if (!['LOGIN_REQUIRED', 'LOGIN_EXPIRED'].includes(error.code)) throw error;
         }
-        await close(browser);
-        browser = await launchBrowser(lib, env.ARCHIVE_BROWSER, { keep_alive: 60000, guardrails: { allowedDomains: LOGIN_DOMAINS } }, browserTiming(env));
-        authenticatedContext = await browser.newContext({ storageState: restored.storageState, serviceWorkers: 'block' });
-        await protectOfficialContext(authenticatedContext, resolveCaptureHost);
-        page = await authenticatedContext.newPage();
-        await page.goto(fetched.url, { waitUntil: 'domcontentloaded', timeout: 30000 });
-        doc = await page.evaluate(extractArticleDocument, { url: fetched.url, wechat: true });
-        if (doc.challenge || doc.invalid) throw new CollectorError('CHALLENGE_REQUIRED', '该微信文章验证尚未完成，请通过管理员入口完成官方验证');
-        const updatedState = await authenticatedContext.storageState({ indexedDB: true });
-        if (JSON.stringify(updatedState) !== JSON.stringify(restored.storageState)) await store.save(updatedState, restored.version);
       }
       assertArticle(doc);
       const images = [];
@@ -368,25 +325,11 @@ export function createCollector({ playwright, fetchImpl = fetch, resolveHost, no
         totalBytes += image.bytes.byteLength;
         if (totalBytes > ARTICLE_IMAGE_LIMIT) throw new CollectorError('RESOURCE_TOO_LARGE', '文章图片总大小超过允许范围');
         const contentType = assertImage(image.bytes, image.contentType);
-        let binary = '';
-        for (let offset = 0; offset < image.bytes.length; offset += 32768) {
-          binary += String.fromCharCode(...image.bytes.subarray(offset, offset + 32768));
-        }
-        const decoded = await page.evaluate(async ({ base64, type }) => {
-          try {
-            const bytes = Uint8Array.from(atob(base64), c => c.charCodeAt(0));
-            const bitmap = await createImageBitmap(new Blob([bytes], { type }));
-            const valid = bitmap.width > 0 && bitmap.height > 0;
-            bitmap.close();
-            return valid;
-          } catch { return false; }
-        }, { base64: btoa(binary), type: contentType });
-        if (!decoded) throw new CollectorError('IMAGE_INCOMPLETE', '文章图片无法完整解码，采集未完成');
         images.push({ source_url: sourceUrl, bytes: image.bytes, content_type: contentType });
       }
       const date = /(?:Z|[+-]\d\d:?\d\d)$/i.test(doc.date || '') ? Date.parse(doc.date) : NaN;
       const createdAt = secondsToMillis(doc.created_seconds);
-      const canonical = doc.canonical ? validatePublicUrl(doc.canonical).href : fetched.url;
+      const canonical = doc.canonical ? validatePublicUrl(doc.canonical).href : verifiedSnapshot ? url.href : fetched.url;
       const parsedCanonical = new URL(canonical);
       const biz = parsedCanonical.searchParams.get('__biz');
       const mid = parsedCanonical.searchParams.get('mid');
@@ -397,7 +340,6 @@ export function createCollector({ playwright, fetchImpl = fetch, resolveHost, no
         ...(parsedCanonical.hostname === 'mp.weixin.qq.com' && biz && mid ? { source_key: `wechat:${biz}:${mid}:${parsedCanonical.searchParams.get('idx') || '1'}` } : {}),
       };
     } catch (error) { throw asCollectorError(error); }
-    finally { await close(browser); }
   }
   async function createLoginSession(env, { url } = {}) {
     const store = new SessionStore(env, now);
@@ -524,17 +466,28 @@ export function createCollector({ playwright, fetchImpl = fetch, resolveHost, no
   }
   async function finishLoginSession(env, sessionId) {
     return withLogin(env, sessionId, async ({ browser, context, page, row, store }) => {
+      let httpAuth = null;
+      let verifiedDocument;
       if (row.purpose === 'article') {
         await page.goto(officialArticleUrl(row.target_url), { waitUntil: 'domcontentloaded', timeout: 30000 });
         const doc = await page.evaluate(extractArticleDocument, { url: row.target_url, wechat: true });
         try { assertArticle(doc); }
         catch (error) { if (['CHALLENGE_REQUIRED', 'ARTICLE_INVALID'].includes(error.code)) return { authenticated: false, version: row.version, purpose: 'article' }; throw error; }
+        verifiedDocument = doc;
+        try { httpAuth = (await store.load()).httpAuth || null; }
+        catch (error) { if (!['LOGIN_REQUIRED', 'LOGIN_EXPIRED'].includes(error.code)) throw error; }
       } else {
         try { await mpRequest(page, '/cgi-bin/searchbiz', { action: 'search_biz', begin: '0', count: '1', query: '微信' }); }
         catch (error) { if (['LOGIN_EXPIRED', 'CHALLENGE_REQUIRED'].includes(error.code)) return { authenticated: false, version: row.version, purpose: 'account' }; throw error; }
+        httpAuth = { token: new URL(page.url()).searchParams.get('token') };
+        const userAgent = await page.evaluate(() => navigator.userAgent);
+        if (typeof userAgent === 'string') httpAuth.userAgent = userAgent;
       }
       const storageState = await context.storageState({ indexedDB: true });
-      const version = await store.save(storageState, row.version, row.id);
+      if (verifiedDocument) await saveArticleVerification(env, {
+        url: row.target_url, version: row.version + 1, loginId: row.id, document: verifiedDocument,
+      }, now());
+      const version = await store.save(storageState, row.version, row.id, httpAuth);
       await terminate(browser);
       return { authenticated: true, version, purpose: row.purpose };
     });

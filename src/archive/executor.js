@@ -8,6 +8,13 @@ import { fetchImageResource } from './resources.js';
 const OPERATIONS = new Map([
   ['searchSources', { call: collector.searchSources, minimum: 1, maximum: 1 }],
   ['getBrowserStatus', { call: collector.getBrowserStatus, minimum: 0, maximum: 0 }],
+  ['listSourceArticles', { call: collector.listSourceArticles, minimum: 1, maximum: 2 }],
+  ['verifyArticle', { call: async (env, url) => {
+    const article = await collector.captureArticle(env, { url });
+    return { title: article.title, image_count: article.images.length,
+      image_bytes: article.images.reduce((sum, image) => sum + image.bytes.byteLength, 0),
+      published_at: article.published_at, transport: 'http' };
+  }, minimum: 1, maximum: 1 }],
   ['createLoginSession', { call: collector.createLoginSession, minimum: 0, maximum: 1 }],
   ['getLoginSession', { call: collector.getLoginSession, minimum: 1, maximum: 1 }],
   ['finishLoginSession', { call: collector.finishLoginSession, minimum: 1, maximum: 1 }],
@@ -32,6 +39,7 @@ function errorEnvelope(error) {
     ...(typeof error?.phase === 'string' ? { phase: error.phase } : {}),
     ...(typeof error?.diagnostic === 'string' ? { diagnostic: error.diagnostic } : {}),
     ...(typeof error?.quota === 'string' ? { quota: error.quota } : {}),
+    ...(error?.transport === 'http' ? { transport: 'http' } : {}),
   } };
 }
 
@@ -91,7 +99,7 @@ export class ArchiveExecutor extends DurableObject {
           kind: 'screenshot', bytes: await value.arrayBuffer(), status: value.status, headers: [...value.headers],
         } };
       }
-      return { ok: true, value };
+      return { ok: true, value, ...(value?.transport === 'http' ? { transport: 'http' } : {}) };
     } catch (error) { return errorEnvelope(error); }
   }
 

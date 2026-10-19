@@ -390,8 +390,10 @@ test('a failed later page in the final round cannot be requested again', async (
   } };
   const config = { collector, maxPages: 1, now: () => tick + 3_000, dispatchWindow: window };
   assert.equal((await runArchiveBatch(env, job.id, config)).state, 'continue');
-  await assert.rejects(runArchiveBatch(env, job.id, config), /RATE_LIMITED/);
-  assert.equal((await runArchiveBatch(env, job.id, config)).state, 'awaiting_window');
+  const waiting = await runArchiveBatch(env, job.id, config);
+  assert.equal(waiting.state, 'waiting_source');
+  assert.equal((await runArchiveBatch(env, job.id, config)).state, 'waiting_source');
+  assert.equal((await runArchiveBatch(env, job.id, { ...config, now: () => waiting.retry_at })).state, 'awaiting_window');
   assert.deepEqual(seen, [0, 5]);
   const saved = await store.getJob(job.id);
   assert.equal(saved.cursor.list_cursor, 5);
@@ -564,8 +566,10 @@ test('the final list failure cannot issue a second poll after the deadline', asy
   let lists = 0;
   const collector = { listSourceArticles: async () => { lists++; throw problem('RATE_LIMITED', true); } };
   const config = { collector, now: () => at('23:30:03'), dispatchWindow: window };
-  await assert.rejects(runArchiveBatch(env, job.id, config), /RATE_LIMITED/);
-  assert.equal((await runArchiveBatch(env, job.id, config)).state, 'awaiting_window');
+  const waiting = await runArchiveBatch(env, job.id, config);
+  assert.equal(waiting.state, 'waiting_source');
+  assert.equal((await runArchiveBatch(env, job.id, config)).state, 'waiting_source');
+  assert.equal((await runArchiveBatch(env, job.id, { ...config, now: () => waiting.retry_at })).state, 'awaiting_window');
   assert.equal(lists, 1);
   assert.equal((await store.getJob(job.id)).progress.final_poll_used, true);
   assert.match((await store.getJob(job.id)).last_error, /RATE_LIMITED/);
@@ -670,4 +674,53 @@ test('quota errors with an invalid retry time safely wait for the next UTC day',
   assert.equal(response.state, 'waiting_quota');
   assert.equal(response.retry_at, (Math.floor(time / 86_400_000) + 1) * 86_400_000);
   assert.equal((await store.getSource(s.id)).baseline_completed_at, null);
+});
+
+
+test('source rate limits preserve pagination and article attempts until the stated retry time', async t => {
+  const { env, store } = setup(t);
+  const s = await source(store);
+  const job = await store.createJob({ kind: 'history', source_id: s.id, range_start: at('00:00:00'), range_end: at('23:00:00') });
+  let clock = at('22:00:00');
+  let mode = 'list';
+  let listings = 0, captures = 0;
+  const limited = () => Object.assign(problem('RATE_LIMITED', true), { retry_at: clock + 60_000 });
+  const collector = {
+    async listSourceArticles() { listings++; if (mode === 'list') throw limited(); return { articles: [entry('one')], next_cursor: 1, has_more: false }; },
+    async captureArticle(_env, article) { captures++; if (mode === 'capture') throw limited(); return capture(article); },
+  };
+  const opts = { collector, now: () => clock };
+  assert.equal((await runArchiveBatch(env, job.id, opts)).state, 'waiting_source');
+  assert.equal((await store.getJob(job.id)).cursor?.list_cursor || 0, 0);
+  assert.equal((await runArchiveBatch(env, job.id, opts)).state, 'waiting_source');
+  assert.equal(listings, 1);
+  clock += 60_000; mode = 'capture';
+  assert.equal((await runArchiveBatch(env, job.id, opts)).state, 'waiting_source');
+  assert.equal((await store.getJobItems(job.id))[0].attempts, 0);
+  assert.equal((await runArchiveBatch(env, job.id, opts)).state, 'waiting_source');
+  assert.equal(captures, 1);
+  clock += 60_000; mode = 'success';
+  assert.equal((await runArchiveBatch(env, job.id, opts)).state, 'completed');
+  assert.equal(listings, 2);
+  assert.equal(captures, 2);
+  assert.equal((await store.listPublished()).length, 1);
+});
+
+test('a source cooldown crossing 23:30 cannot start another automatic capture', async t => {
+  const { env, store } = setup(t);
+  const s = await source(store);
+  const job = await auto(store, s.id);
+  let clock = at('23:29:55');
+  let captures = 0;
+  const collector = {
+    async listSourceArticles() { return { articles: [entry('one')], next_cursor: 1, has_more: false }; },
+    async captureArticle() { captures++; throw Object.assign(problem('RATE_LIMITED', true), { retry_at: clock + 60_000 }); },
+  };
+  const opts = { collector, now: () => clock };
+  assert.equal((await runArchiveBatch(env, job.id, opts)).state, 'waiting_source');
+  const selected = (await store.getJob(job.id)).article_key;
+  clock += 60_000;
+  assert.equal((await runArchiveBatch(env, job.id, opts)).state, 'awaiting_window');
+  assert.equal(captures, 1);
+  assert.equal((await store.getJob(job.id)).article_key, selected);
 });

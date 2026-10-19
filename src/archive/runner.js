@@ -178,6 +178,17 @@ async function markBrowserWait(context, error) {
   return browserWaitResult(job, retryAt);
 }
 
+async function markSourceWait(context, error) {
+  const time = context.now();
+  const retryAt = Number.isSafeInteger(error.retry_at) && error.retry_at > time ? error.retry_at : time + 300_000;
+  await rememberProgress(context, { source_wait_until: retryAt });
+  const job = await context.store.updateJob(context.job.id, {
+    status: 'retrying', next_retry_at: retryAt, last_error: errorText(error),
+  });
+  await counters(context);
+  return { ...result(['paused', 'cancelled', 'completed'].includes(job.status) ? job.status : 'waiting_source', job.id), retry_at: retryAt };
+}
+
 async function counters(context) {
   const items = await context.store.getJobItems(context.job.id);
   const counts = {
@@ -346,7 +357,7 @@ async function processItem(context, item) {
             await context.store.updateJobItem(context.job.id, article.id, { attempts: before, status: 'pending' });
             throw error;
           }
-          if (['BROWSER_QUOTA_EXCEEDED', 'BROWSER_BUSY'].includes(error.code)) {
+          if (['BROWSER_QUOTA_EXCEEDED', 'BROWSER_BUSY', 'RATE_LIMITED'].includes(error.code)) {
             await context.store.updateJobItem(context.job.id, article.id, {
               attempts: before, status: 'pending', last_error: null,
             });
@@ -489,6 +500,10 @@ export async function runArchiveBatch(env, jobId, {
     }
     return browserWaitResult(job, browserRetryAt);
   }
+  const sourceRetryAt = Number(job.progress.source_wait_until || 0);
+  if (sourceRetryAt > now() && !await canFinishWithoutBrowser(store, job)) {
+    return { ...result('waiting_source', job.id), retry_at: sourceRetryAt };
+  }
   if (!env.ARCHIVE_BUCKET) throw failure('尚未配置文章存储', 'CONFIG_MISSING');
   if (!Number.isInteger(maxPages) || maxPages < 1 || !Number.isInteger(maxArticles) || maxArticles < 1) throw failure('批次大小无效', 'INVALID_BATCH');
   const owner = `${jobId}:${crypto.randomUUID()}`;
@@ -511,6 +526,10 @@ export async function runArchiveBatch(env, jobId, {
       if (context.browserRetryAt && context.browserRetryAt <= now()) {
         await rememberProgress(context, { browser_wait_until: null });
         if (context.job.next_retry_at === context.browserRetryAt) await store.updateJob(jobId, { next_retry_at: null });
+      }
+      if (sourceRetryAt && sourceRetryAt <= now()) {
+        await rememberProgress(context, { source_wait_until: null });
+        if (context.job.next_retry_at === sourceRetryAt) await store.updateJob(jobId, { next_retry_at: null });
       }
       await store.updateJob(jobId, { status: 'running' });
       const pollState = await startAutomaticPoll(context);
@@ -566,6 +585,7 @@ export async function runArchiveBatch(env, jobId, {
       }
       if (error.code === 'BROWSER_QUOTA_EXCEEDED') return markQuota(context, error);
       if (error.code === 'BROWSER_BUSY') return markBrowserWait(context, error);
+      if (error.code === 'RATE_LIMITED') return markSourceWait(context, error);
       if (AUTH_CODES.has(error.code)) return markAuth(context, error);
       await store.updateJob(jobId, { status: 'failed', last_error: errorText(error) });
       await counters(context);

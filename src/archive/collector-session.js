@@ -45,6 +45,18 @@ export async function decryptSession(value, key) {
 
 function changed(result) { return Number(result?.meta?.changes || 0) === 1; }
 
+function httpAuthentication(value) {
+  if (value == null) return null;
+  if (typeof value !== 'object' || typeof value.token !== 'string' || !/^\d{1,32}$/.test(value.token)) {
+    throw new CollectorError('LOGIN_STATE_INVALID', '微信登录信息格式无效，请重新验证登录');
+  }
+  if (value.userAgent !== undefined && (typeof value.userAgent !== 'string' || !value.userAgent
+      || value.userAgent.length > 512 || /[\u0000-\u001f\u007f]/.test(value.userAgent))) {
+    throw new CollectorError('LOGIN_STATE_INVALID', '微信登录信息格式无效，请重新验证登录');
+  }
+  return { token: value.token, ...(value.userAgent ? { userAgent: value.userAgent } : {}) };
+}
+
 /** Only opaque browser IDs and encrypted storage state cross workflow boundaries. */
 export class SessionStore {
   constructor(env, now = () => Date.now()) { this.env = env; this.now = now; }
@@ -72,7 +84,9 @@ export class SessionStore {
     }
     this.loadedObjectKey = row.object_key;
     this.loadedLoginId = saved.loginId || null;
-    return { version: row.version, storageState: saved.storageState };
+    this.loadedHttpAuth = httpAuthentication(saved.httpAuth);
+    return { version: row.version, storageState: saved.storageState,
+      ...(this.loadedHttpAuth ? { httpAuth: this.loadedHttpAuth } : {}) };
   }
   async beginLogin({ purpose = 'account', target_url = null } = {}) {
     const current = await this.current();
@@ -152,14 +166,16 @@ export class SessionStore {
     ]);
     return changed(results[0]);
   }
-  async save(storageState, expectedVersion, loginId = null) {
+  async save(storageState, expectedVersion, loginId = null, authentication) {
     await this.ready();
     if (!loginId && !this.loadedObjectKey) throw new CollectorError('LOGIN_STALE', '保存登录状态前必须先读取当前版本');
     // A version identifies a human-verified login generation. Rotating cookies
     // must not invalidate an already queued workflow recovery event.
     const version = loginId ? expectedVersion + 1 : expectedVersion;
+    const httpAuth = httpAuthentication(authentication === undefined
+      ? loginId ? null : this.loadedHttpAuth : authentication);
     const objectKey = `private/wechat-state/${version}-${crypto.randomUUID()}.json`;
-    const encrypted = await encryptSession({ version, storageState, loginId: loginId || this.loadedLoginId }, this.key);
+    const encrypted = await encryptSession({ version, storageState, loginId: loginId || this.loadedLoginId, httpAuth }, this.key);
     await this.env.ARCHIVE_BUCKET.put(objectKey, encrypted, { httpMetadata: { contentType: 'application/json' } });
     // Object versions are immutable; a stale writer can never overwrite a newer login.
     const where = loginId ? 'active_login_id = ?' : 'active_login_id IS NULL AND object_key = ?';
@@ -189,6 +205,7 @@ export class SessionStore {
     }
     this.loadedObjectKey = objectKey;
     this.loadedLoginId = loginId || this.loadedLoginId;
+    this.loadedHttpAuth = httpAuth;
     return version;
   }
 }

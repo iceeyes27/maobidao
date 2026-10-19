@@ -1,9 +1,32 @@
 import { WorkflowEntrypoint } from "cloudflare:workers";
 import { ArchiveStore } from "./store.js";
+import { imageResourceId } from "./resources.js";
 
 export class ArchiveWorkflow extends WorkflowEntrypoint {
   async run(event, step) {
     const store = new ArchiveStore(this.env.ARCHIVE_DB);
+    if (event.payload.action === "verify-image") {
+      return step.do("verify-image", { retries: { limit: 0, delay: "1 second" }, timeout: "1 minute" }, async () => {
+        const imageId = await imageResourceId(event.payload.url);
+        const output = await this.env.ARCHIVE_EXECUTOR.getByName(imageId).fetchImage(event.payload.url);
+        return output.ok ? { state: "verified", content_type: output.value.contentType,
+          bytes: output.value.bytes.byteLength, decoded: output.value.decoded === true }
+          : { state: "failed", code: output.error.code };
+      });
+    }
+    if (event.payload.action === "verify-capture") {
+      return step.do("verify-capture", { retries: { limit: 0, delay: "1 second" }, timeout: "4 minutes" }, async () => {
+        const lease = await store.acquireLease("wechat-account", `verify-capture:${crypto.randomUUID()}`, 300_000);
+        if (!lease) return { state: "busy", code: "BUSY" };
+        try {
+          const output = await this.env.ARCHIVE_EXECUTOR.getByName("wechat-account")
+            .collectorOperation("verifyArticle", [event.payload.url]);
+          return output.ok ? { state: "verified", ...output.value }
+            : { state: "failed", code: output.error.code, phase: output.error.phase || null,
+              diagnostic: output.error.diagnostic || null };
+        } finally { await store.releaseLease(lease); }
+      });
+    }
     // This check uses the same account operation as the UI and never returns
     // cookies, browser IDs, navigation URLs or saved account storage.
     if (event.payload.action === "verify-search") {
@@ -61,12 +84,29 @@ export class ArchiveWorkflow extends WorkflowEntrypoint {
       const searches = [];
       const count = payload.verify_repeat === true ? 2 : 1;
       for (let attempt = 0; attempt < count; attempt++) {
+        if (attempt > 0) await new Promise(resolve => setTimeout(resolve, 10_000));
         const response = await executor.collectorOperation("searchSources", [payload.query]);
         if (!response.ok) return {
           state: "failed", code: response.error.code, phase: response.error.phase || null, diagnostic: response.error.diagnostic || null,
           retry_at: response.error.retry_at || null, before: before.ok ? before.value : null, searches,
+          ...(response.error.transport ? { transport: response.error.transport } : {}),
         };
-        searches.push({ count: response.value.length, names: response.value.map(source => source.name) });
+        const search = { count: response.value.length, names: response.value.map(source => source.name),
+          ...(response.transport ? { transport: response.transport } : {}) };
+        if (payload.verify_articles === true) {
+          const exact = response.value.filter(source => source.name === payload.query);
+          if (exact.length !== 1) return { state: "failed", code: "SOURCE_NOT_UNIQUE", searches: [...searches, search] };
+          // Separate discovery and pagination; the HTTP client also enforces a
+          // persistent account-wide interval for UI and background requests.
+          await new Promise(resolve => setTimeout(resolve, 60_000));
+          const listed = await executor.collectorOperation("listSourceArticles", [exact[0], { cursor: 0, count: 5 }]);
+          if (!listed.ok) return { state: "failed", code: listed.error.code, phase: listed.error.phase || null,
+            diagnostic: listed.error.diagnostic || null, transport: listed.error.transport || null, searches: [...searches, search] };
+          search.article_page = { count: listed.value.articles.length,
+            trusted_times: listed.value.articles.filter(article => article.time_trusted).length,
+            ...(listed.transport ? { transport: listed.transport } : {}) };
+        }
+        searches.push(search);
       }
       return { state: "verified", before: before.ok ? before.value : null, searches };
     } finally { await store.releaseLease(lease); }
@@ -104,8 +144,8 @@ export class ArchiveWorkflow extends WorkflowEntrypoint {
       }
 
       if (["completed", "cancelled"].includes(result.state)) return result;
-      if (["waiting_quota", "waiting_browser"].includes(result.state)) {
-        const kind = result.state === "waiting_quota" ? "quota-reset" : "browser-ready";
+      if (["waiting_quota", "waiting_browser", "waiting_source"].includes(result.state)) {
+        const kind = result.state === "waiting_quota" ? "quota-reset" : result.state === "waiting_source" ? "source-ready" : "browser-ready";
         if (Date.now() < result.retry_at) await step.sleepUntil(`${kind}-${batch}`, result.retry_at);
         continue;
       }

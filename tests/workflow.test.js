@@ -91,6 +91,7 @@ test('operator lifecycle verification stops and releases its lease when reconnec
 });
 
 test('operator search verification repeats the real search and excludes account storage and identifiers', async t => {
+  t.mock.method(globalThis, 'setTimeout', callback => { callback(); return 0; });
   const { calls, workflow, step } = fixture(t, { operation: async name => name === 'getBrowserStatus'
     ? { ok: true, value: { active_sessions: 0 } }
     : { ok: true, value: [{ name: 'Example', fakeid: 'private-fakeid', account_biz: 'private-biz' }] } });
@@ -101,6 +102,22 @@ test('operator search verification repeats the real search and excludes account 
   assert.doesNotMatch(JSON.stringify(result), /private-fakeid|private-biz/);
   assert.deepEqual(calls.filter(call => call.operationName === 'searchSources').map(call => call.args), [['Example'], ['Example']]);
   assert.equal(calls[0].ttl, 240_000);
+  assert.equal(calls.at(-1).type, 'release');
+});
+
+test('operator list verification waits once and returns only bounded article metrics', async t => {
+  const waits = [];
+  t.mock.method(globalThis, 'setTimeout', (callback, delay) => { waits.push(delay); callback(); return 0; });
+  const { workflow, calls, step } = fixture(t, { operation: async name => {
+    if (name === 'getBrowserStatus') return { ok: true, value: { active_sessions: 0 } };
+    if (name === 'searchSources') return { ok: true, transport: 'http', value: [{ name: 'Example', fakeid: 'private-source' }] };
+    return { ok: true, transport: 'http', value: { articles: [{ time_trusted: true, url: 'private-article' }], has_more: true } };
+  } });
+  const output = await workflow.run({ payload: { action: 'verify-search', query: 'Example', verify_articles: true } }, step);
+  assert.deepEqual(waits, [60_000]);
+  assert.equal(output.state, 'verified');
+  assert.deepEqual(output.searches[0].article_page, { count: 1, trusted_times: 1, transport: 'http' });
+  assert.doesNotMatch(JSON.stringify(output), /private-source|private-article/);
   assert.equal(calls.at(-1).type, 'release');
 });
 
@@ -179,7 +196,7 @@ test('operator login preparation releases its lease when the RPC transport throw
   assert.equal(calls.at(-1).type, 'release');
 });
 
-for (const state of ['waiting_quota', 'waiting_browser']) for (const retryAt of [500, 2000]) {
+for (const state of ['waiting_quota', 'waiting_browser', 'waiting_source']) for (const retryAt of [500, 2000]) {
   test(`${state} recovery ${retryAt < 1000 ? 'skips a past sleep' : 'sleeps until a future reset'} before continuing the same job`, async t => {
     let now = 1000;
     t.mock.method(Date, 'now', () => now);
@@ -199,7 +216,7 @@ for (const state of ['waiting_quota', 'waiting_browser']) for (const retryAt of 
     assert.deepEqual(result, { state: 'completed', job_id: 'same-job', dispatch_tick: null });
     assert.equal(calls.length, 2);
     assert.ok(calls.every(call => call.name === 'job:same-job' && call.jobId === 'same-job'));
-    assert.deepEqual(sleeps, retryAt < 1000 ? [] : [{ name: state === 'waiting_quota' ? 'quota-reset-0' : 'browser-ready-0', timestamp: retryAt }]);
+    assert.deepEqual(sleeps, retryAt < 1000 ? [] : [{ name: state === 'waiting_quota' ? 'quota-reset-0' : state === 'waiting_source' ? 'source-ready-0' : 'browser-ready-0', timestamp: retryAt }]);
   });
 }
 
@@ -249,4 +266,16 @@ test('only an empty result from the same final tick records no update', async t 
   assert.match(daily[0].sql, /status='no_update'/);
   assert.equal(daily[0].values[1], job.source_id);
   assert.equal(daily[0].values[2], job.monitor_date);
+});
+
+
+test('operator capture verification returns only metrics and releases its account lease', async t => {
+  const value = { title: 'Article', image_count: 2, image_bytes: 100, published_at: 1234, transport: 'http' };
+  const { workflow, calls, step } = fixture(t, { operation: async (name, args) => {
+    assert.equal(name, 'verifyArticle');
+    assert.deepEqual(args, ['https://mp.weixin.qq.com/s/article']);
+    return { ok: true, value };
+  } });
+  assert.deepEqual(await workflow.run({ payload: { action: 'verify-capture', url: 'https://mp.weixin.qq.com/s/article' } }, step), { state: 'verified', ...value });
+  assert.equal(calls.at(-1).type, 'release');
 });

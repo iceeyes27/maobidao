@@ -134,11 +134,11 @@ export async function scheduledArchive(controller, env) {
         const progress = job.progress || {};
         if (Math.max(job.next_retry_at || 0, progress.quota_wait_until || 0) > now) {
           const currentTick = progress.dispatch_window?.tick;
-          // A short browser wait must not discard the independently scheduled
+          // A short account wait must not discard the independently scheduled
           // final check. Preserve the wait and let the existing Workflow or
           // final dispatch relay consume this authorization after it expires.
           if (window.final && window.tick === window.end
-              && progress.browser_wait_until > now
+              && Math.max(progress.browser_wait_until || 0, progress.source_wait_until || 0) > now
               && !(progress.quota_wait_until > now)
               && (!Number.isSafeInteger(currentTick) || currentTick <= window.tick)
               && !progress.final_capture_used

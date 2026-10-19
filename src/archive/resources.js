@@ -1,4 +1,5 @@
 import { assertImage, resolvePublicHost, safeFetch, validatePublicUrl } from './collector-security.js';
+import { validateImageDecode } from './image-decoder.js';
 
 export const IMAGE_LIMIT = 6 * 1024 * 1024;
 
@@ -12,5 +13,7 @@ export async function imageResourceId(value) {
 /** Every redirect and DNS answer receives the same checks as an article request. */
 export async function fetchImageResource(url, { fetchImpl = fetch, resolveHost = resolvePublicHost } = {}) {
   const image = await safeFetch(url, { fetchImpl, resolveHost, maxBytes: IMAGE_LIMIT, accept: 'image/*' });
-  return { url: image.url, bytes: image.bytes, contentType: assertImage(image.bytes, image.contentType) };
+  const contentType = assertImage(image.bytes, image.contentType);
+  await validateImageDecode(image.bytes, contentType);
+  return { url: image.url, bytes: image.bytes, contentType, decoded: true };
 }

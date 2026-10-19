@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 import { test } from 'node:test';
+import { encode as encodePng } from 'fast-png';
 import { createCollector, extractArticleDocument, normalizeSourcePage } from '../src/archive/collector.js';
 import { CollectorError, classifyCollectorError, collectorDiagnostic, isPublicAddress, readLimited, resolvePublicHost, safeFetch, validatePublicUrl } from '../src/archive/collector-security.js';
 import { SessionStore, decryptSession, encryptSession, sessionCryptoKey } from '../src/archive/collector-session.js';
@@ -11,6 +12,7 @@ class D1Adapter {
   constructor() {
     this.sqlite = new DatabaseSync(':memory:');
     this.sqlite.exec(readFileSync(new URL('../migrations/0001_archive.sql', import.meta.url), 'utf8'));
+    this.sqlite.exec(readFileSync(new URL('../migrations/0004_wechat_throttle.sql', import.meta.url), 'utf8'));
   }
   prepare(sql) {
     const statement = (values = []) => ({
@@ -33,7 +35,7 @@ class D1Adapter {
 
 class Bucket {
   values = new Map();
-  async get(key) { const value = this.values.get(key); return value === undefined ? null : { text: async () => value }; }
+  async get(key) { const value = this.values.get(key); return value === undefined ? null : { size: new TextEncoder().encode(value).length, text: async () => value }; }
   async put(key, value) { this.values.set(key, value); }
   async delete(key) { this.values.delete(key); }
 }
@@ -46,11 +48,31 @@ function environment(t) {
 
 const hasCode = code => error => error instanceof CollectorError && error.code === code;
 const noDns = async () => {};
-const png = Uint8Array.from([137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13]);
+const png = Uint8Array.from(encodePng({ width: 1, height: 1, channels: 4, depth: 8, data: Uint8Array.of(255, 0, 0, 255) }));
 const documentResult = (extra = {}) => ({
   title: 'An article', author: 'Author', source_name: 'Source', html: '<p>A complete body</p>',
-  text: 'A complete body', images: [], date: '', invalid: false, challenge: false, removed: false, ...extra,
+  text: 'A complete body', images: [], date: '', canonical: '', created_seconds: null,
+  invalid: false, challenge: false, removed: false, unsupported_background: false, ...extra,
 });
+
+const escaped = value => String(value).replaceAll('&', '&amp;').replaceAll('"', '&quot;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
+function articleHtml(extra = {}, { wechat = false } = {}) {
+  const doc = documentResult(extra);
+  if (doc.challenge) return '<!doctype html><html><head><title>安全验证</title></head><body>当前环境异常，请完成安全验证</body></html>';
+  const images = doc.images.map(url => `<img data-src="${escaped(url)}">`).join('');
+  return `<!doctype html><html><head><title>${escaped(doc.title)}</title>
+    <meta name="author" content="${escaped(doc.author)}"><meta property="og:site_name" content="${escaped(doc.source_name)}">
+    ${doc.date ? `<meta property="article:published_time" content="${escaped(doc.date)}">` : ''}
+    ${doc.canonical ? `<meta property="og:url" content="${escaped(doc.canonical)}">` : ''}</head><body>
+    <h1 id="activity-name">${escaped(doc.title)}</h1>
+    ${wechat ? `<span id="js_author_name">${escaped(doc.author)}</span><span id="js_name">${escaped(doc.source_name)}</span>` : ''}
+    <${wechat ? 'div id="js_content"' : 'article'}>${doc.invalid ? '' : doc.html + images}</${wechat ? 'div' : 'article'}>
+    ${doc.created_seconds ? `<script>var ct = "${doc.created_seconds}";</script>` : ''}</body></html>`;
+}
+
+const noBrowser = { launch: async () => assert.fail('Ordinary capture must not launch a browser'),
+  acquire: async () => assert.fail('Ordinary capture must not acquire a browser'),
+  limits: async () => assert.fail('Ordinary capture must not check browser capacity') };
 
 function browserDouble(doc = documentResult()) {
   const calls = { launches: [], acquisitions: [], connections: [], closes: 0, decodes: 0, contextOptions: [], urls: [] };
@@ -222,44 +244,67 @@ test('source pagination uses publication creation time and raw group counts', ()
   assert.throws(() => normalizeSourcePage({ publish_page: {} }, { fakeid: 'source' }, 0, 5), hasCode('SOURCE_FORMAT_CHANGED'));
 });
 
-test('capture isolates source HTML and downloads, decodes, deduplicates every image', async () => {
-  const fake = browserDouble(documentResult({ images: ['https://cdn.public.com/photo.png', 'https://cdn.public.com/photo.png'] }));
+test('capture parses inert server HTML and fully decodes every unique image without a browser binding', async () => {
   const calls = [];
-  const collector = createCollector({ playwright: fake.playwright, resolveHost: noDns, fetchImpl: async url => {
+  const collector = createCollector({ playwright: noBrowser, resolveHost: noDns, fetchImpl: async url => {
     calls.push(url);
     return url.endsWith('.png') ? new Response(png, { headers: { 'content-type': 'image/png' } })
-      : new Response('<article><h1>example</h1><script>fetch("http://localhost")</script></article>', { headers: { 'content-type': 'text/html' } });
+      : new Response(articleHtml({ images: ['https://cdn.public.com/photo.png', 'https://cdn.public.com/photo.png'],
+        html: '<p>A complete body</p><script>fetch("http://localhost")</script>' }), { headers: { 'content-type': 'text/html' } });
   } });
-  const result = await collector.captureArticle({ ARCHIVE_BROWSER: {} }, { url: 'https://news.public.com/article' });
+  const result = await collector.captureArticle({}, { url: 'https://news.public.com/article' });
   assert.equal(result.images.length, 1);
   assert.deepEqual(result.images[0].bytes, png);
-  assert.equal(fake.calls.decodes, 1);
-  assert.deepEqual(fake.calls.launches[0].guardrails.allowedDomains, []);
-  assert.equal(fake.calls.contextOptions[0].javaScriptEnabled, false);
-  assert.equal(fake.calls.closes, 1);
+  assert.equal(result.title, 'An article');
+  assert.equal(result.author, 'Author');
+  assert.equal(result.text, 'A complete body');
   assert.equal(calls.length, 2);
 });
 
-test('capture rejects incomplete images and verification shells, closing its browser', async t => {
+test('capture rejects incomplete images and verification shells without opening a browser', async t => {
   const fetchImpl = async url => url.endsWith('.png') ? new Response('<html>verification</html>', { headers: { 'content-type': 'text/html' } })
-    : new Response('<html>article</html>', { headers: { 'content-type': 'text/html' } });
-  const fake = browserDouble(documentResult({ images: ['https://cdn.public.com/photo.png'] }));
-  await assert.rejects(createCollector({ playwright: fake.playwright, fetchImpl, resolveHost: noDns })
-    .captureArticle({ ARCHIVE_BROWSER: {} }, { url: 'https://news.public.com/article' }), hasCode('IMAGE_INCOMPLETE'));
-  assert.equal(fake.calls.closes, 1);
-  const challenge = browserDouble(documentResult({ challenge: true }));
-  await assert.rejects(createCollector({ playwright: challenge.playwright, fetchImpl, resolveHost: noDns })
-    .captureArticle(environment(t), { url: 'https://mp.weixin.qq.com/s/article' }), hasCode('CHALLENGE_REQUIRED'));
-  assert.equal(challenge.calls.closes, 1);
+    : new Response(articleHtml({ images: ['https://cdn.public.com/photo.png'] }), { headers: { 'content-type': 'text/html' } });
+  await assert.rejects(createCollector({ playwright: noBrowser, fetchImpl, resolveHost: noDns })
+    .captureArticle({}, { url: 'https://news.public.com/article' }), hasCode('IMAGE_INCOMPLETE'));
+  const env = environment(t);
+  delete env.ARCHIVE_BROWSER;
+  await assert.rejects(createCollector({ playwright: noBrowser, resolveHost: noDns,
+    fetchImpl: async () => new Response(articleHtml({ challenge: true }), { headers: { 'content-type': 'text/html' } }) })
+    .captureArticle(env, { url: 'https://mp.weixin.qq.com/s/article' }), hasCode('CHALLENGE_REQUIRED'));
 });
 
 test('capture rejects an image that has a valid header but cannot be decoded', async () => {
-  const fake = browserDouble(documentResult({ images: ['https://cdn.public.com/photo.png'] }));
-  fake.calls.decodeResult = false;
-  const collector = createCollector({ playwright: fake.playwright, resolveHost: noDns, fetchImpl: async url => new Response(url.endsWith('.png') ? png : '<html></html>', {
+  const broken = png.subarray(0, png.length - 10);
+  const collector = createCollector({ playwright: noBrowser, resolveHost: noDns, fetchImpl: async url => new Response(url.endsWith('.png') ? broken : articleHtml({ images: ['https://cdn.public.com/photo.png'] }), {
     headers: { 'content-type': url.endsWith('.png') ? 'image/png' : 'text/html' },
   }) });
-  await assert.rejects(collector.captureArticle({ ARCHIVE_BROWSER: {} }, { url: 'https://news.public.com/article' }), hasCode('IMAGE_INCOMPLETE'));
+  await assert.rejects(collector.captureArticle({}, { url: 'https://news.public.com/article' }), hasCode('IMAGE_INCOMPLETE'));
+});
+
+test('direct WeChat capture preserves canonical identity and the original publication time from inert HTML', async () => {
+  const canonical = 'https://mp.weixin.qq.com/s?__biz=thebiz&mid=123&idx=2';
+  const collector = createCollector({ playwright: noBrowser, resolveHost: noDns,
+    fetchImpl: async () => new Response(articleHtml({ canonical, created_seconds: 1_700_000_000 }, { wechat: true }), { headers: { 'content-type': 'text/html' } }) });
+  const result = await collector.captureArticle({}, { url: 'https://mp.weixin.qq.com/s/article' });
+  assert.equal(result.title, 'An article');
+  assert.equal(result.author, 'Author');
+  assert.equal(result.source_name, 'Source');
+  assert.equal(result.published_at, 1_700_000_000_000);
+  assert.equal(result.original_url, canonical);
+  assert.equal(result.source_key, 'wechat:thebiz:123:2');
+});
+
+test('direct capture resolves lazy image URLs from actual HTML and validates the downloaded pixels', async () => {
+  const requests = [];
+  const collector = createCollector({ playwright: noBrowser, resolveHost: noDns, fetchImpl: async url => {
+    requests.push(url);
+    if (url.endsWith('.png')) return new Response(png, { headers: { 'content-type': 'image/png' } });
+    return new Response(articleHtml({ html: '<p>A complete body</p><img data-original="../photo.png" src="http://127.0.0.1/placeholder">' }), { headers: { 'content-type': 'text/html' } });
+  } });
+  const result = await collector.captureArticle({}, { url: 'https://news.public.com/folder/article' });
+  assert.deepEqual(requests, ['https://news.public.com/folder/article', 'https://news.public.com/photo.png']);
+  assert.equal(result.images[0].source_url, 'https://news.public.com/photo.png');
+  assert.deepEqual(result.images[0].bytes, png);
 });
 
 test('computed CSS background images in article descendants prevent a false complete capture', async t => {
@@ -283,11 +328,9 @@ test('computed CSS background images in article descendants prevent a false comp
   }) });
   const extracted = extractArticleDocument({ url: 'https://news.public.com/article', wechat: false });
   assert.equal(extracted.unsupported_background, true);
-  const fake = browserDouble(extracted);
-  const collector = createCollector({ playwright: fake.playwright, resolveHost: noDns,
-    fetchImpl: async () => new Response('<article>Article body</article>', { headers: { 'content-type': 'text/html' } }) });
-  await assert.rejects(collector.captureArticle({ ARCHIVE_BROWSER: {} }, { url: 'https://news.public.com/article' }), hasCode('IMAGE_INCOMPLETE'));
-  assert.equal(fake.calls.closes, 1);
+  const collector = createCollector({ playwright: noBrowser, resolveHost: noDns,
+    fetchImpl: async () => new Response('<html><head><title>Article</title><style>article section::before{background-image:url("https://cdn.public.com/background.png")}</style></head><body><article><section>Article body</section></article></body></html>', { headers: { 'content-type': 'text/html' } }) });
+  await assert.rejects(collector.captureArticle({}, { url: 'https://news.public.com/article' }), hasCode('IMAGE_INCOMPLETE'));
 });
 
 test('login completion verifies the backend before saving and reconnects by opaque ID', async t => {
@@ -315,46 +358,50 @@ test('restoring saved cookies never substitutes for verifying actual backend log
   const env = environment(t);
   const store = new SessionStore(env);
   const login = await store.beginLogin();
-  await store.save({ cookies: [], origins: [] }, 0, login.id);
+  await store.save({ cookies: [{ name: 'session', value: 'test-cookie', domain: 'mp.weixin.qq.com', path: '/' }], origins: [] }, 0, login.id, { token: '123456' });
   const fake = browserDouble();
-  const collector = createCollector({ playwright: fake.playwright });
+  const collector = createCollector({ playwright: fake.playwright, resolveHost: noDns,
+    fetchImpl: async () => Response.json({ base_resp: { ret: 200003 } }) });
   await assert.rejects(collector.searchSources(env, 'example'), hasCode('LOGIN_EXPIRED'));
-  assert.equal(fake.calls.closes, 1);
+  assert.equal(fake.calls.closes, 0);
+  assert.equal(fake.calls.launches.length, 0);
 });
 
-test('search waits for browser capacity without replacing the verified login', async t => {
+test('direct search succeeds without browser capacity or replacing the verified login', async t => {
   const env = environment(t);
   let clock = Date.parse('2026-10-19T06:00:00Z');
   const store = new SessionStore(env, () => clock);
   const login = await store.beginLogin();
-  const saved = { cookies: [], origins: [] };
-  await store.save(saved, 0, login.id);
+  const saved = { cookies: [{ name: 'session', value: 'test-cookie', domain: 'mp.weixin.qq.com', path: '/' }], origins: [] };
+  await store.save(saved, 0, login.id, { token: '123456' });
   const fake = browserDouble();
   fake.setStorage(saved);
   fake.setUrl('https://mp.weixin.qq.com/cgi-bin/home?token=123456');
   let checks = 0;
   const sleeps = [];
-  fake.playwright.limits = async () => ({ activeSessions: [], maxConcurrentSessions: 3,
-    allowedBrowserAcquisitions: ++checks === 1 ? 0 : 1, timeUntilNextAllowedBrowserAcquisition: checks === 1 ? 20 : 0 });
-  fake.calls.apiResponse = { status: 200, text: JSON.stringify({ base_resp: { ret: 0 }, list: [{ nickname: 'Example', fakeid: 'source' }] }) };
+  fake.playwright.limits = async () => { checks++; throw new Error('Browser is unavailable'); };
   const collector = createCollector({ playwright: fake.playwright, resolveHost: noDns, now: () => clock,
+    fetchImpl: async () => Response.json({ base_resp: { ret: 0 }, list: [{ nickname: 'Example', fakeid: 'source' }] }),
     sleep: async delay => { sleeps.push(delay); clock += delay; } });
   assert.deepEqual(await collector.searchSources(env, 'Example'), [{ name: 'Example', fakeid: 'source' }]);
-  assert.ok(sleeps.length > 0);
-  assert.equal(fake.calls.launches.length, 1);
-  assert.equal(fake.calls.closes, 1);
+  assert.deepEqual(sleeps, []);
+  assert.equal(checks, 0);
+  assert.equal(fake.calls.launches.length, 0);
+  assert.equal(fake.calls.closes, 0);
   assert.equal((await store.current()).version, 1);
 });
 
-test('a configured daily budget pauses a rejected search while preserving the verified login', async t => {
+test('WeChat search throttling stays distinct from the configured browser budget', async t => {
   const env = environment(t);
   env.ARCHIVE_BROWSER_DAILY_BUDGET_SECONDS = '600';
   const clock = Date.parse('2026-10-19T06:00:00Z');
   const store = new SessionStore(env, () => clock);
   const login = await store.beginLogin();
-  await store.save({ cookies: [], origins: [] }, 0, login.id);
+  await store.save({ cookies: [{ name: 'session', value: 'test-cookie', domain: 'mp.weixin.qq.com', path: '/' }], origins: [] }, 0, login.id, { token: '123456' });
   let launches = 0;
-  const collector = createCollector({ now: () => clock, sleep: () => assert.fail('Daily budget exhaustion must not keep retrying'),
+  const collector = createCollector({ now: () => clock, resolveHost: noDns,
+    fetchImpl: async () => Response.json({ base_resp: { ret: 200013 } }),
+    sleep: () => assert.fail('Source throttling must not create a browser'),
     playwright: {
       limits: async () => ({ activeSessions: [], maxConcurrentSessions: 4,
         allowedBrowserAcquisitions: 1, timeUntilNextAllowedBrowserAcquisition: 0 }),
@@ -362,9 +409,8 @@ test('a configured daily budget pauses a rejected search while preserving the ve
       history: async () => [{ sessionId: 'closed', closeReason: 1, closeReasonText: 'NormalClosure',
         startTime: clock - 601_000, endTime: clock - 1000 }],
     } });
-  await assert.rejects(collector.searchSources(env, 'Example'), error => error.code === 'BROWSER_QUOTA_EXCEEDED'
-    && error.status === 429 && error.quota === 'browser_budget' && error.retry_at === Date.parse('2026-10-20T00:00:00Z'));
-  assert.equal(launches, 1);
+  await assert.rejects(collector.searchSources(env, 'Example'), error => error.code === 'RATE_LIMITED' && !error.quota);
+  assert.equal(launches, 0);
   assert.equal((await store.current()).version, 1);
   assert.equal((await store.load()).version, 1);
 });
@@ -410,26 +456,78 @@ test('article verification opens only official articles and cannot complete on a
   await assert.rejects(collector.createLoginSession(env), hasCode('LOGIN_BUSY'));
 });
 
-test('retrying a challenged WeChat article actually restores its verified browser state', async t => {
+test('a challenged article reuses only its encrypted human-verified snapshot without reopening a browser', async t => {
   const env = environment(t);
-  const store = new SessionStore(env);
-  const login = await store.beginLogin({ purpose: 'article', target_url: 'https://mp.weixin.qq.com/s/article' });
-  const savedState = { cookies: [{ name: 'verified', value: 'official-cookie', domain: 'mp.weixin.qq.com', path: '/' }], origins: [] };
-  await store.save(savedState, 0, login.id);
-  const fake = browserDouble([documentResult({ invalid: true, challenge: true }), documentResult()]);
-  fake.setStorage(savedState);
+  const target = 'https://mp.weixin.qq.com/s/article';
+  const fake = browserDouble(documentResult({ images: ['https://cdn.public.com/photo.png'] }));
+  fake.setUrl(target);
   const collector = createCollector({ playwright: fake.playwright, resolveHost: noDns,
-    fetchImpl: async () => new Response('<html>当前环境异常</html>', { headers: { 'content-type': 'text/html' } }) });
-  const result = await collector.captureArticle(env, { url: 'https://mp.weixin.qq.com/s/article' });
+    fetchImpl: async url => url.endsWith('.png') ? new Response(png, { headers: { 'content-type': 'image/png' } })
+      : new Response(articleHtml({ challenge: true }), { headers: { 'content-type': 'text/html' } }) });
+  const login = await collector.createLoginSession(env, { url: target });
+  assert.deepEqual(await collector.finishLoginSession(env, login.session_id), { authenticated: true, version: 1, purpose: 'article' });
+  const connections = fake.calls.connections.length;
+  delete env.ARCHIVE_BROWSER;
+  const result = await collector.captureArticle(env, { url: target });
   assert.equal(result.title, 'An article');
-  assert.deepEqual(fake.calls.contextOptions[1].storageState, savedState);
-  assert.ok(fake.calls.launches[1].guardrails.allowedDomains.includes('mp.weixin.qq.com'));
-  assert.equal(fake.calls.launches[1].guardrails.allowedDomains.includes('*.qq.com'), false);
-  assert.equal(fake.calls.closes, 2);
-  assert.equal(fake.calls.urls.at(-1), 'https://mp.weixin.qq.com/s/article');
-  let aborted = false;
-  await fake.calls.contextRoute({ request: () => ({ url: () => 'http://127.0.0.1/private' }), abort: async () => { aborted = true; }, continue: async () => assert.fail('Unsafe request continued') });
-  assert.equal(aborted, true);
+  assert.equal(result.images.length, 1);
+  assert.deepEqual(result.images[0].bytes, png);
+  assert.equal(fake.calls.connections.length, connections);
+  assert.equal(fake.calls.launches.length, 0);
+  assert.equal(fake.calls.acquisitions.length, 1);
+  const verified = [...env.ARCHIVE_BUCKET.values].filter(([key]) => key.startsWith('private/wechat-articles/'));
+  assert.equal(verified.length, 1);
+  assert.equal(String(verified[0][1]).includes('A complete body'), false);
+  await assert.rejects(collector.captureArticle(env, { url: 'https://mp.weixin.qq.com/s/other' }), hasCode('CHALLENGE_REQUIRED'));
+});
+
+test('a snapshot without canonical metadata preserves the original article URL after a challenge redirect', async t => {
+  const env = environment(t);
+  const target = 'https://mp.weixin.qq.com/s/verified-original';
+  const challenge = 'https://mp.weixin.qq.com/mp/wappoc_appmsgcaptcha?example=1';
+  const fake = browserDouble(documentResult({ canonical: '' }));
+  fake.setUrl(target);
+  const requested = [];
+  const collector = createCollector({ playwright: fake.playwright, resolveHost: noDns,
+    fetchImpl: async url => {
+      requested.push(url);
+      if (url === target) return new Response('', { status: 302, headers: { location: challenge } });
+      assert.equal(url, challenge);
+      return new Response(articleHtml({ challenge: true }), { headers: { 'content-type': 'text/html' } });
+    } });
+  const login = await collector.createLoginSession(env, { url: target });
+  await collector.finishLoginSession(env, login.session_id);
+  const connections = fake.calls.connections.length;
+  delete env.ARCHIVE_BROWSER;
+  const result = await collector.captureArticle(env, { url: target });
+  assert.deepEqual(requested, [target, challenge]);
+  assert.equal(result.original_url, target);
+  assert.equal(result.title, 'An article');
+  assert.equal(result.html, '<p>A complete body</p>');
+  assert.equal(fake.calls.connections.length, connections);
+  assert.equal(fake.calls.launches.length, 0);
+  assert.equal(fake.calls.acquisitions.length, 1);
+});
+
+test('expired or previous-login article snapshots cannot bypass a new article challenge', async t => {
+  let clock = Date.now();
+  const env = environment(t);
+  const target = 'https://mp.weixin.qq.com/s/article';
+  const fake = browserDouble();
+  fake.setUrl(target);
+  const collector = createCollector({ playwright: fake.playwright, now: () => clock, resolveHost: noDns,
+    fetchImpl: async () => new Response(articleHtml({ challenge: true }), { headers: { 'content-type': 'text/html' } }) });
+  const login = await collector.createLoginSession(env, { url: target });
+  await collector.finishLoginSession(env, login.session_id);
+  const connections = fake.calls.connections.length;
+  clock += 24 * 60 * 60 * 1000 + 1;
+  await assert.rejects(collector.captureArticle(env, { url: target }), hasCode('CHALLENGE_REQUIRED'));
+  clock -= 24 * 60 * 60 * 1000 + 1;
+  const store = new SessionStore(env, () => clock);
+  const next = await store.beginLogin();
+  await store.save({ cookies: [], origins: [] }, 1, next.id);
+  await assert.rejects(collector.captureArticle(env, { url: target }), hasCode('CHALLENGE_REQUIRED'));
+  assert.equal(fake.calls.connections.length, connections);
 });
 
 test('a temporary browser connection failure preserves the current login task', async t => {
@@ -541,20 +639,20 @@ test('daily browser quota errors wait until the next UTC day without becoming ar
   assert.equal(classifyCollectorError(new Error('Unable to connect to browser: code: 429: message: Too many concurrent browsers')).code, 'BROWSER_BUSY');
 });
 
-test('capture preserves the browser quota classification from the actual SDK error shape', async () => {
+test('browser quota exhaustion cannot prevent an ordinary server-side article capture', async () => {
+  let launches = 0;
   const collector = createCollector({
-    playwright: { launch: async () => { throw new Error('Unable to create new browser: code: 429: message: Browser time limit exceeded for today'); } },
+    playwright: { launch: async () => { launches++; throw new Error('Unable to create new browser: code: 429: message: Browser time limit exceeded for today'); } },
     resolveHost: noDns,
-    fetchImpl: async () => new Response('<article>An article</article>', { headers: { 'content-type': 'text/html' } }),
+    fetchImpl: async () => new Response(articleHtml(), { headers: { 'content-type': 'text/html' } }),
   });
-  await assert.rejects(collector.captureArticle({ ARCHIVE_BROWSER: {} }, { url: 'https://news.public.com/article' }), error =>
-    error.code === 'BROWSER_QUOTA_EXCEEDED' && error.retry_at > Date.now());
+  assert.equal((await collector.captureArticle({}, { url: 'https://news.public.com/article' })).title, 'An article');
+  assert.equal(launches, 0);
 });
 
 test('capture caches DNS per hostname only within that capture and checks redirect hosts', async () => {
-  const fake = browserDouble(documentResult({ images: ['https://cdn.public.com/one.png', 'https://cdn.public.com/two.png'] }));
   const requests = [];
-  const collector = createCollector({ playwright: fake.playwright, fetchImpl: async value => {
+  const collector = createCollector({ playwright: noBrowser, fetchImpl: async value => {
     const url = new URL(value);
     requests.push(url.href);
     if (url.hostname === 'cloudflare-dns.com') return Response.json({ Status: 0, Answer: [
@@ -562,16 +660,16 @@ test('capture caches DNS per hostname only within that capture and checks redire
     ] });
     if (url.pathname === '/one.png') return new Response('', { status: 302, headers: { location: 'https://other.public.com/photo.png' } });
     if (url.pathname.endsWith('.png')) return new Response(png, { headers: { 'content-type': 'image/png' } });
-    return new Response('<article>A complete body</article>', { headers: { 'content-type': 'text/html' } });
+    return new Response(articleHtml({ images: ['https://cdn.public.com/one.png', 'https://cdn.public.com/two.png'] }), { headers: { 'content-type': 'text/html' } });
   } });
-  await collector.captureArticle({ ARCHIVE_BROWSER: {} }, { url: 'https://news.public.com/article' });
+  await collector.captureArticle({}, { url: 'https://news.public.com/article' });
   const dns = requests.filter(url => url.includes('cloudflare-dns.com'));
   assert.equal(dns.length, 6);
   for (const hostname of ['news.public.com', 'cdn.public.com', 'other.public.com']) {
     assert.equal(dns.filter(url => new URL(url).searchParams.get('name') === hostname).length, 2);
   }
   assert.equal(requests.length, 10);
-  await collector.captureArticle({ ARCHIVE_BROWSER: {} }, { url: 'https://news.public.com/article' });
+  await collector.captureArticle({}, { url: 'https://news.public.com/article' });
   assert.equal(requests.filter(url => url.includes('cloudflare-dns.com')).length, 12);
 });
 
@@ -601,7 +699,6 @@ test('image resources retain public-address, redirect, content and size restrict
 
 test('many images use separate cloud requests while the parent fetch budget remains bounded', async () => {
   const urls = Array.from({ length: 60 }, (_, index) => `https://cdn.public.com/${index}.png`);
-  const fake = browserDouble(documentResult({ images: [...urls, urls[0]] }));
   const parentRequests = [];
   const imageRequests = new Map();
   const routeIds = [];
@@ -611,15 +708,15 @@ test('many images use separate cloud requests while the parent fetch budget rema
       url.searchParams.get('type') === 'A' ? { type: 1, data: '8.8.8.8' } : { type: 28, data: '2606:4700:4700::1111' },
     ] }) : null;
   };
-  const collector = createCollector({ playwright: fake.playwright, fetchImpl: async value => {
+  const collector = createCollector({ playwright: noBrowser, fetchImpl: async value => {
     parentRequests.push(value);
     assert.ok(parentRequests.length <= 50, 'Parent external request budget exceeded');
     const response = dns(value);
     if (response) return response;
     assert.equal(new URL(value).hostname, 'news.public.com', 'Parent must not fetch article images');
-    return new Response('<article>A complete body</article>', { headers: { 'content-type': 'text/html' } });
+    return new Response(articleHtml({ images: [...urls, urls[0]] }), { headers: { 'content-type': 'text/html' } });
   } });
-  const env = { ARCHIVE_BROWSER: {}, ARCHIVE_EXECUTOR: { getByName(id) {
+  const env = { ARCHIVE_EXECUTOR: { getByName(id) {
     routeIds.push(id);
     return { async fetchImage(url) {
       const requests = [];
@@ -635,7 +732,6 @@ test('many images use separate cloud requests while the parent fetch budget rema
   const captured = await collector.captureArticle(env, { url: 'https://news.public.com/article' });
   assert.equal(parentRequests.length, 3);
   assert.equal(captured.images.length, 60);
-  assert.equal(fake.calls.decodes, 60);
   assert.equal(imageRequests.size, 60);
   assert.ok([...imageRequests.values()].every(requests => requests.length === 3));
   assert.equal(new Set(routeIds).size, 60);
@@ -644,18 +740,19 @@ test('many images use separate cloud requests while the parent fetch budget rema
 });
 
 test('image RPC errors and invalid payloads cannot produce a complete capture', async () => {
-  const fake = browserDouble(documentResult({ images: ['https://cdn.public.com/photo.png#fragment'] }));
-  const collector = createCollector({ playwright: fake.playwright, resolveHost: noDns,
-    fetchImpl: async () => new Response('<article>A complete body</article>', { headers: { 'content-type': 'text/html' } }) });
+  const collector = createCollector({ playwright: noBrowser, resolveHost: noDns,
+    fetchImpl: async () => new Response(articleHtml({ images: ['https://cdn.public.com/photo.png#fragment'] }), { headers: { 'content-type': 'text/html' } }) });
   let response = { ok: false, error: { code: 'UNSAFE_URL', message: 'Private redirect', retryable: false } };
-  const env = { ARCHIVE_BROWSER: {}, ARCHIVE_EXECUTOR: { getByName: () => ({ fetchImage: async url => {
+  const env = { ARCHIVE_EXECUTOR: { getByName: () => ({ fetchImage: async url => {
     assert.equal(url, 'https://cdn.public.com/photo.png', 'Resource binding must receive the same normalized URL as its hashed ID');
     return response;
   } }) } };
   await assert.rejects(collector.captureArticle(env, { url: 'https://news.public.com/article' }), hasCode('UNSAFE_URL'));
-  response = { ok: true, value: { bytes: png.buffer, contentType: 'image/png' } };
+  response = { ok: true, value: { bytes: png.buffer, contentType: 'image/png', decoded: true } };
   assert.equal((await collector.captureArticle(env, { url: 'https://news.public.com/article' })).images.length, 1);
-  response = { ok: true, value: { bytes: new Uint8Array(IMAGE_LIMIT + 1), contentType: 'image/png' } };
+  response = { ok: true, value: { bytes: png, contentType: 'image/png' } };
+  await assert.rejects(collector.captureArticle(env, { url: 'https://news.public.com/article' }), hasCode('IMAGE_INCOMPLETE'));
+  response = { ok: true, value: { bytes: new Uint8Array(IMAGE_LIMIT + 1), contentType: 'image/png', decoded: true } };
   await assert.rejects(collector.captureArticle(env, { url: 'https://news.public.com/article' }), hasCode('RESOURCE_TOO_LARGE'));
 });
 

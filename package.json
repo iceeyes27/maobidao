@@ -13,6 +13,13 @@
   },
   "dependencies": {
     "@cloudflare/playwright": "1.3.6",
+    "@jsquash/webp": "1.5.0",
+    "css-select": "6.0.0",
+    "fast-png": "8.0.0",
+    "htmlparser2": "12.0.0",
+    "jpeg-js": "0.4.4",
+    "omggif": "1.0.10",
+    "postcss": "8.5.31",
     "sanitize-html": "2.18.1"
   },
   "devDependencies": {

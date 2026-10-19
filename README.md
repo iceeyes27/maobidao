@@ -1,6 +1,6 @@
 # 文章链接归档网站
 
-当前运行方式为 **Cloudflare Workers + SQLite Durable Objects + Browser Run + Workflows + D1 + R2**。管理员可以配置公众号自动检查、按日期获取历史文章，也可以继续手动提交链接。新文章内容保存后直接由网站展示，不需要提交 Git 或重新部署代码。
+当前运行方式为 **Cloudflare Workers + SQLite Durable Objects + Workflows + D1 + R2**。搜索与文章列表使用云端直接请求，正文解析与图片完整性检查也由服务端处理；Browser Run 只用于扫码和人工安全验证。管理员可以配置公众号自动检查、按日期获取历史文章，也可以继续手动提交链接。新文章内容保存后直接由网站展示，不需要提交 Git 或重新部署代码。
 
 ## 云端采集管理
 
@@ -21,7 +21,7 @@
 
 部署流程负责首次启动。管理页显示最近成功检查时间；需要恢复时，登录后点击“启动或恢复定时检查”。这个操作使用受保护的 `POST /api/admin/scheduler/start`，重复操作复用当天实例。普通状态刷新只读记录，不会启动定时器或采集。迟到 5 分钟及以上的旧检查会跳过，不会在恢复后集中补跑；没有执行检查不能解释为公众号没有更新。
 
-此配置以 Workers Free 为前提，不要求升级 Workers Paid。Workflow 负责定时、持久等待和任务编排；SQLite Durable Object 执行图文处理及需要浏览器的管理操作，正文处理不放在 Workflow 的短 CPU 步骤内。免费额度仍有边界：Workflows 每日提供 3,000 个步骤；Browser Run 每日提供 10 分钟浏览器时间、最多 3 个并发浏览器。扫码、文章检查和采集共用浏览器额度，历史任务可能需要分多日完成。详见 [Workflows 限制](https://developers.cloudflare.com/workflows/reference/limits/)、[Workflows 计费](https://developers.cloudflare.com/workflows/reference/pricing/) 和 [Browser Run 免费额度](https://developers.cloudflare.com/browser-run/pricing/)。
+此配置以 Workers Free 为前提，不要求升级 Workers Paid。Workflow 负责定时、持久等待和任务编排；SQLite Durable Object 执行图文处理及需要浏览器的管理操作，正文处理不放在 Workflow 的短 CPU 步骤内。免费额度仍有边界：Workflows 每日提供 3,000 个步骤；Browser Run 每日提供 10 分钟浏览器时间、最多 3 个并发浏览器。普通自动采集与历史采集不消耗浏览器时间；扫码和人工安全验证使用浏览器额度。详见 [Workflows 限制](https://developers.cloudflare.com/workflows/reference/limits/)、[Workflows 计费](https://developers.cloudflare.com/workflows/reference/pricing/) 和 [Browser Run 免费额度](https://developers.cloudflare.com/browser-run/pricing/)。
 
 遇到可识别的额度不足，任务显示“等待额度恢复”，保存当前文章、分页位置及最早重试时间。恢复后继续原任务，自动任务不会因此改选第二篇；重试时间在管理页转换为北京时间。R2、D1、网站请求和存储也受各自账号额度约束。
 
@@ -42,7 +42,11 @@ npm run dev
 
 扫码使用可重连的浏览器默认上下文，断开管理请求不会销毁验证页。文章验证所需的 Cookie、本地存储和 IndexedDB 均在进入原文前恢复；对应兼容代码固定于 Playwright 1.3.6，升级 SDK 时需核对 `src/archive/vendor/` 的来源与恢复测试。
 
-登录、搜索、分页和正文解析共用浏览器创建检查，遇临时容量限制会先等待，单次最多等待 30 秒。采集任务仍无法取得浏览器时保留同一篇和进度，稍后自动继续，不消耗文章失败次数；每日浏览器时长耗尽则按下一 UTC 日恢复。
+扫码和人工验证创建浏览器前会检查容量，遇临时容量限制单次最多等待 30 秒；每日浏览器时长耗尽则按下一 UTC 日恢复。搜索和列表复用加密保存的微信登录状态，以账号为单位控制请求间隔。微信限流会保存最早重试时间，后台持久等待，不前移分页、不消耗文章失败次数。
+
+正文由有界静态 HTML/CSS 解析器提取，源页面脚本不会执行。PNG、JPEG、GIF、WebP 图片分别下载并完整解码，动画逐帧检查；每图由独立 Durable Object 处理。AVIF、APNG 和低位深交错 PNG 暂不支持完整校验，遇到时明确保留为未完成。
+
+指定文章经人工验证后，已验证正文以精确地址和当前登录版本加密保存，24 小时内可供同篇挑战恢复使用。采集仍须重新下载、解码并保存全部图片，验证正文快照不代表采集完成。
 
 `ARCHIVE_BROWSER_DAILY_BUDGET_SECONDS` 默认部署值为 `600`。新建浏览器被拒绝后，仅当近期正常或空闲关闭的会话在当天 UTC 日期内已达到此预算，才暂停至下一个 UTC 日期；这项保守运行预算不是 Cloudflare 完整计费用量。无法核实的历史或基础设施失败会话不计入预算。调整套餐后应同步调整此值，`0` 表示停用项目预算检查。
 
@@ -63,6 +67,8 @@ npm run deploy
 会话密钥脚本通过标准输入配置加密密钥，不显示密钥，并保留已存在的密钥。R2 需由账号先在 Cloudflare 控制台启用。正文和图片必须全部写入并校验后才标为公开可见；私有登录对象不能通过网站媒体接口读取。
 
 上线验收需要用真实账号确认：目标公众号搜索、历史分页、真实发布时间、正文及全部图片、扫码后恢复和重复发表防护。本期“发表”只指本网站可见，不包含公众号转载发表。Browser Run 的平台能力和单元测试不等于微信实号验收，CSS 背景图、音视频和附件不在当前图文采集范围内。
+
+2026-10-19 本次部署验证：377 项自动化测试通过，云端直接搜索成功，PNG/JPEG/WebP 真实解码成功。微信文章列表仍返回 `200013` 限流，原文样本仍要求官方安全验证，完整的“发现新文→采集→网站发布”尚未通过实号验收；当前尚未添加监控来源，定时器运行不等于已开始监控公众号。
 
 下面保留原有静态归档脚本及接口的说明，供离线兼容和历史维护参考；云端新文章不经过该构建流程。
 

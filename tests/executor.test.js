@@ -5,7 +5,7 @@ import { test } from 'node:test';
 
 const mocks = {};
 globalThis.__archiveExecutorMocks = mocks;
-const names = ['searchSources', 'getBrowserStatus', 'createLoginSession', 'getLoginSession', 'finishLoginSession', 'getLoginScreenshot'];
+const names = ['captureArticle', 'searchSources', 'listSourceArticles', 'getBrowserStatus', 'createLoginSession', 'getLoginSession', 'finishLoginSession', 'getLoginScreenshot'];
 const hooks = registerHooks({
   resolve(specifier, context, next) {
     if (specifier === 'cloudflare:workers') return { url: 'test:executor-cloudflare', shortCircuit: true };
@@ -74,7 +74,7 @@ test('collector RPC accepts only its fixed operation list and injects env on the
   };
   const searched = await executor.collectorOperation('searchSources', ['Example']);
   assert.deepEqual(searched, { ok: true, value: [{ fakeid: 'source', name: 'Example' }] });
-  for (const name of ['__proto__', 'captureArticle', 'listSourceArticles', 'runBatch']) {
+  for (const name of ['__proto__', 'captureArticle', 'runBatch']) {
     assert.equal((await executor.collectorOperation(name, [])).error.code, 'INVALID_COLLECTOR_OPERATION');
   }
   assert.equal((await executor.collectorOperation('searchSources', [env, 'Example'])).ok, false);
