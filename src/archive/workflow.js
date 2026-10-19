@@ -5,6 +5,10 @@ import { imageResourceId } from "./resources.js";
 export class ArchiveWorkflow extends WorkflowEntrypoint {
   async run(event, step) {
     const store = new ArchiveStore(this.env.ARCHIVE_DB);
+    if (event.payload.action === "probe-reader") {
+      return step.do("probe-reader", { retries: { limit: 0, delay: "1 second" }, timeout: "4 minutes" },
+        () => this.env.ARCHIVE_EXECUTOR.getByName("wechat-account").probeReader({ url: event.payload.url, probe_id: event.payload.probe_id }));
+    }
     if (event.payload.action === "bootstrap-rss") {
       return step.do("bootstrap-rss", { retries: { limit: 2, delay: "15 seconds" }, timeout: "4 minutes" },
         () => this.env.ARCHIVE_EXECUTOR.getByName("wechat-account").bootstrapRss());

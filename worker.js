@@ -6,6 +6,8 @@ import { ArchiveStore } from "./src/archive/store.js";
 import { articleForPage, isAdmin, json } from "./src/archive/core.js";
 import { renderArticle, renderHome, renderNotFound } from "./src/archive/pages.js";
 import { scheduledArchive } from "./src/archive/dispatch.js";
+import { publicArticleComments } from "./src/archive/reading-service.js";
+import { renderPublicComments } from "./src/archive/comment-pages.js";
 
 export { ArchiveWorkflow } from "./src/archive/workflow.js";
 export { ArchiveScheduler } from "./src/archive/scheduler-workflow.js";
@@ -40,7 +42,10 @@ async function publicArchive(request, env) {
     }
     const object = article.body_key ? await env.ARCHIVE_BUCKET.get(article.body_key) : null;
     if (!object || object.size > 4 * 1024 * 1024) return html(renderNotFound(), 404);
-    return html(renderArticle(articleForPage(article), await object.text()));
+    let commentHtml = "";
+    try { commentHtml = renderPublicComments(await publicArticleComments(env, article.id)); }
+    catch { console.warn(JSON.stringify({ event: "archive_comments_unavailable", article_id: article.id })); }
+    return html(renderArticle(articleForPage(article), (await object.text()) + commentHtml));
   }
   const mediaMatch = url.pathname.match(/^\/media\/([a-f0-9]{32})\/([a-f0-9]{64})$/);
   if (mediaMatch) {
@@ -66,6 +71,13 @@ export default {
     try {
       const url = new URL(request.url);
       if (url.pathname.startsWith("/api/admin/")) return await handleAdmin(request, env);
+      const comments = url.pathname.match(/^\/api\/articles\/([a-f\d]{32})\/comments$/);
+      if (comments) {
+        if (request.method !== "GET") return new Response("Method not allowed", { status: 405 });
+        const snapshot = await publicArticleComments(env, comments[1]);
+        return json(snapshot ? { status: snapshot.complete ? "ready" : "partial", ...snapshot }
+          : { status: "unavailable", comments: null });
+      }
       if (url.pathname === "/admin" || url.pathname === "/admin.html") {
         if (!["GET", "HEAD"].includes(request.method)) return new Response("Method not allowed", { status: 405 });
         const asset = await env.ASSETS.fetch(new Request(new URL("/admin", url), { headers: request.headers }));

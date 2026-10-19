@@ -102,7 +102,7 @@ test("not-found page has a usable home link", () => {
   assert.equal(escapeHtml('&<>"\''), "&amp;&lt;&gt;&quot;&#39;");
 });
 
-async function adminHarness({ loggedIn = true, configured = true, failHistoryOnce = false, jobs = [], sources = [{ id: "source-1", name: "测试公众号", enabled: true }], scheduler = null, detailPages = null, sourceNotice = null, fetchOverride = null } = {}) {
+async function adminHarness({ loggedIn = true, configured = true, failHistoryOnce = false, jobs = [], sources = [{ id: "source-1", name: "测试公众号", enabled: true }], scheduler = null, reader = null, detailPages = null, sourceNotice = null, fetchOverride = null } = {}) {
   class Node {
     constructor() { this.children = []; this.events = {}; this.value = ""; this.hidden = false; this.disabled = false; this.textContent = ""; }
     addEventListener(name, callback) { this.events[name] = callback; }
@@ -120,7 +120,7 @@ async function adminHarness({ loggedIn = true, configured = true, failHistoryOnc
   const timers = new Map();
   const requests = [];
   let timerId = 0;
-  const status = { configured, login: { status: "saved" }, sources, jobs, scheduler };
+  const status = { configured, login: { status: "saved" }, sources, jobs, scheduler, reader };
   const fetch = async (path, options = {}) => {
     requests.push({ path, ...options });
     const override = await fetchOverride?.(path, options);
@@ -151,7 +151,7 @@ async function adminHarness({ loggedIn = true, configured = true, failHistoryOnc
     await node.events.submit({ preventDefault() {}, submitter: node.querySelector("button"), currentTarget: node });
     await settle();
   };
-  return { get, document, requests, timers, submit, settle };
+  return { get, document, window, requests, timers, submit, settle };
 }
 
 test("admin login clears the password and uses the cookie for later reads", async () => {
@@ -183,6 +183,107 @@ test("admin background polling only reads and stops while the page is hidden", a
   await admin.document.events.visibilitychange();
   assert.ok(admin.requests.length > before);
   assert.equal(admin.timers.size, 1);
+});
+
+test("reader UI shows separate actual restrictions and never starts a probe automatically", async () => {
+  const admin = await adminHarness({ reader: { session: { configured: false }, probe: { state: "completed", checked_at: Date.now(),
+    discovery: { state: "blocked", code: "READER_LOGIN_REQUIRED" }, article: { state: "blocked", code: "CHALLENGE_REQUIRED" },
+    comments: { state: "not_attempted" } } } });
+  assert.match(admin.get("reader-session-status").textContent, /尚未配置/);
+  const result = nodeText(admin.get("reader-results"));
+  assert.match(result, /新文章列表.*需要有效的微信阅读授权/);
+  assert.match(result, /文章正文.*安全验证/);
+  assert.match(result, /公开留言与回复.*尚未执行/);
+  assert.doesNotMatch(result, /登录正常|没有留言|本次获取完成/);
+  assert.ok(admin.requests.every(request => !request.method || request.method === "GET"));
+});
+
+test("reader UI distinguishes empty discovery, partial comments and expired authorization", async () => {
+  const admin = await adminHarness({ reader: { session: { configured: true, expired: true }, probe: { state: "completed",
+    discovery: { state: "empty", article_count: 0 }, article: { state: "available", comment_id_present: false },
+    comments: { state: "partial", count: 12, reply_count: 4, complete: false } } } });
+  assert.match(admin.get("reader-session-status").textContent, /已过期/);
+  const result = nodeText(admin.get("reader-results"));
+  assert.match(result, /实时发现能力尚未确认/);
+  assert.match(result, /正文可读取；未取得公开留言标识/);
+  assert.match(result, /12 条公开留言、4 条回复；尚未确认全部获取完成/);
+});
+
+test("changing reading authorization invalidates results from the previous session", async () => {
+  const admin = await adminHarness({ reader: { session: { configured: true }, probe: { state: "session_changed", checked_at: Date.now(),
+    discovery: { state: "available", article_count: 20 }, article: { state: "available", comment_id_present: true },
+    comments: { state: "available", count: 12, reply_count: 4, complete: true } } } });
+  assert.match(admin.get("reader-probe-status").textContent, /授权已变化，请重新验证/);
+  const result = nodeText(admin.get("reader-results"));
+  assert.doesNotMatch(result, /已读取|正文可读取|本次获取完成/);
+  assert.match(result, /尚未验证/);
+});
+
+test("reader probe uses an optional public URL and sends no authentication values", async () => {
+  const admin = await adminHarness();
+  await admin.submit("reader-probe-form");
+  let probes = admin.requests.filter(request => request.path === "/api/admin/reader/probe");
+  assert.deepEqual(JSON.parse(probes[0].body), {});
+  admin.get("reader-article-url").value = "https://mp.weixin.qq.com/s?__biz=test&mid=1&idx=1&scene=124#wechat_redirect";
+  await admin.submit("reader-probe-form");
+  probes = admin.requests.filter(request => request.path === "/api/admin/reader/probe");
+  assert.deepEqual(JSON.parse(probes[1].body), { url: "https://mp.weixin.qq.com/s?__biz=test&mid=1&idx=1" });
+  assert.match(admin.get("reader-message").textContent, /验证已安排/);
+  admin.get("reader-article-url").value = "https://mp.weixin.qq.com/s?__biz=test&mid=1&key=private&uin=123&pass_ticket=private";
+  await admin.submit("reader-probe-form");
+  assert.equal(admin.get("reader-article-url").value, "");
+  assert.equal(admin.requests.filter(request => request.path === "/api/admin/reader/probe").length, 2);
+  assert.match(admin.get("reader-message").textContent, /导入一次微信阅读授权/);
+  assert.doesNotMatch(admin.get("reader-message").textContent, /private/);
+});
+
+test("reading authorization clears immediately and is never forwarded to the probe endpoint", async () => {
+  const authorizedUrl = "https://mp.weixin.qq.com/s?__biz=MzE5ODk2NjUwOA%3D%3D&mid=1&idx=1&uin=MTIz&key=private-key&pass_ticket=private-pass";
+  let admin;
+  admin = await adminHarness({ fetchOverride: (path, options) => {
+    if (path === "/api/admin/reader/session") {
+      assert.equal(admin.get("reader-session-url").value, "");
+      assert.deepEqual(JSON.parse(options.body), { url: authorizedUrl });
+      return apiResponse({ success: true, session: { configured: true } });
+    }
+    if (path === "/api/admin/reader/probe") return apiResponse({ probe_id: "probe-new", status: "queued" });
+  } });
+  admin.get("reader-session-url").value = authorizedUrl;
+  admin.get("reader-article-url").value = "https://mp.weixin.qq.com/s?key=another-private-key";
+  await admin.submit("reader-session-form");
+  assert.equal(admin.get("reader-session-url").value, "");
+  assert.deepEqual(JSON.parse(admin.requests.find(request => request.path === "/api/admin/reader/probe").body), {});
+  assert.match(admin.get("reader-session-message").textContent, /阅读授权已保存/);
+  assert.doesNotMatch(nodeText(admin.get("reader-results")) + admin.get("reader-session-message").textContent, /private/);
+});
+
+test("ordinary share URLs cannot be imported as reading authorization and remain cleared", async () => {
+  const admin = await adminHarness();
+  admin.get("reader-session-url").value = "https://mp.weixin.qq.com/s/example";
+  await admin.submit("reader-session-form");
+  assert.equal(admin.get("reader-session-url").value, "");
+  assert.match(admin.get("reader-session-message").textContent, /普通分享链接/);
+  assert.ok(!admin.requests.some(request => request.path.startsWith("/api/admin/reader/") && request.method === "POST"));
+});
+
+test("failed reading authorization never echoes an upstream secret or triggers a probe", async () => {
+  const admin = await adminHarness({ fetchOverride: path => path === "/api/admin/reader/session"
+    ? apiResponse({ error: "Failed key=private-key cookie=private-cookie" }, 400) : undefined });
+  admin.get("reader-session-url").value = "https://mp.weixin.qq.com/mp/profile_ext?uin=123&key=private-key&pass_ticket=private-pass";
+  await admin.submit("reader-session-form");
+  assert.equal(admin.get("reader-session-url").value, "");
+  assert.doesNotMatch(admin.get("reader-session-message").textContent, /private-key|private-cookie|private-pass/);
+  assert.ok(!admin.requests.some(request => request.path === "/api/admin/reader/probe"));
+  admin.get("reader-session-url").value = "sensitive reading URL";
+  admin.window.events.pagehide();
+  assert.equal(admin.get("reader-session-url").value, "");
+});
+
+test("reader authorization form uses a password field and explains the public share limitation", async () => {
+  const html = await readFile(new URL("../public/admin.html", import.meta.url), "utf8");
+  assert.match(html, /id="reader-session-url" type="password"/);
+  assert.match(html, /普通分享链接不包含阅读状态/);
+  assert.match(html, /请勿发到聊天中/);
 });
 
 test("admin history rejects impossible and reversed dates before creating a task", async () => {

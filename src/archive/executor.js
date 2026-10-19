@@ -5,6 +5,7 @@ import { dispatchJob, dispatchPending, scheduledArchive } from './dispatch.js';
 import { bootstrapRss } from './rss-bootstrap.js';
 import { runArchiveBatch } from './runner.js';
 import { fetchImageResource } from './resources.js';
+import { runReadingProbe } from './reading-service.js';
 
 const OPERATIONS = new Map([
   ['searchSources', { call: collector.searchSources, minimum: 1, maximum: 1 }],
@@ -113,6 +114,11 @@ export class ArchiveExecutor extends DurableObject {
   async bootstrapRss() {
     this.#bindScope('account');
     return bootstrapRss(this.env, { dispatchJob });
+  }
+
+  async probeReader(options) {
+    this.#bindScope('account');
+    return runReadingProbe(this.env, options);
   }
 
   async runPending() {

@@ -4,6 +4,8 @@ import { dispatchJob, dispatchPending, signalWaitingJobs } from "./dispatch.js";
 import { ensureScheduler } from "./scheduler.js";
 import { isRssSource } from "./rss-schedule.js";
 import { RSS_ACCOUNT_BIZ, RSS_FEED_URL, RSS_STATE_KEY } from "./rss-source.js";
+import { readingStatus, requestReadingProbe } from "./reading-service.js";
+import { saveReaderSession } from "./reader-session.js";
 
 async function rssCoverage(env) {
   try {
@@ -130,10 +132,26 @@ export async function handleAdmin(request, env) {
     const scheduler = store ? await env.ARCHIVE_DB.prepare("SELECT instance_id,last_tick_at,last_success_at,last_error FROM archive_scheduler WHERE singleton=1").first() : null;
     const enriched = [];
     for (const job of jobs) enriched.push({ ...job, source_name: byId.get(job.source_id) || "", counts: await countsFor(store, job) });
-    return json({ configured: !missingBindings(env).length, enabled: env.ARCHIVE_AUTO_ENABLED === "true", cloud_enabled: env.ARCHIVE_ENABLED === "true", missing: missingBindings(env), login, sources, jobs: enriched, scheduler });
+    return json({ configured: !missingBindings(env).length, enabled: env.ARCHIVE_AUTO_ENABLED === "true", cloud_enabled: env.ARCHIVE_ENABLED === "true", missing: missingBindings(env), login, sources, jobs: enriched, scheduler,
+      reader: await readingStatus(env) });
   }
 
   requireConfigured(env);
+
+  if (url.pathname === "/api/admin/reader/session") {
+    requireMethod(request, "POST");
+    const data = await readJson(request, 24 * 1024);
+    const lease = await store.acquireLease("wechat-reader", `reader-session:${crypto.randomUUID()}`, 30000);
+    if (!lease) throw new ArchiveError("BUSY", "阅读验证正在进行，请等待结果后再导入授权。", 409);
+    try { return json({ session: await saveReaderSession(env, data.url || data.credentials) }); }
+    finally { await store.releaseLease(lease); }
+  }
+
+  if (url.pathname === "/api/admin/reader/probe") {
+    requireMethod(request, "POST");
+    const data = await readJson(request, 16 * 1024);
+    return json(await requestReadingProbe(env, data.url), 202);
+  }
 
   if (url.pathname === "/api/admin/scheduler/start") {
     requireMethod(request, "POST");

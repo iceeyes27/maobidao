@@ -80,6 +80,13 @@
     $("wechat-screenshot").removeAttribute("src");
     $("wechat-live-view").removeAttribute("href");
     $("links").value = "";
+    $("reader-article-url").value = "";
+    $("reader-session-url").value = "";
+    $("reader-results").replaceChildren();
+    $("reader-session-status").textContent = "";
+    $("reader-probe-status").textContent = "";
+    message("reader-message", "");
+    message("reader-session-message", "");
     for (const id of ["sources-list", "source-results", "jobs-list", "job-detail"]) $(id).replaceChildren();
     message("page-message", "");
     message("login-message", text, false);
@@ -136,7 +143,7 @@
   function setConfigured(configured) {
     if (state.configured === configured) return;
     state.configured = configured;
-    for (const id of ["source-search-form", "history-form", "links-form"]) {
+    for (const id of ["source-search-form", "history-form", "links-form", "reader-probe-form", "reader-session-form"]) {
       const button = $(id).querySelector("button[type=submit]") || $(id).querySelector("button");
       button.requiresConfiguration = true;
       button.disabled = !configured;
@@ -198,6 +205,93 @@
     if (scheduler?.last_error) text += ` ${readableError(scheduler.last_error)}`;
     if (stale) text += " 检查记录已超过 10 分钟未更新，请恢复定时检查。";
     $("scheduler-status").textContent = text;
+  }
+
+  const readerErrors = {
+    BUSY: "另一项阅读操作正在进行，请稍后重新验证",
+    READER_LOGIN_REQUIRED: "需要有效的微信阅读授权",
+    READER_SESSION_EXPIRED: "微信阅读授权已过期，请重新导入",
+    READER_SESSION_INVALID: "阅读授权无效，请使用含阅读状态的官方链接",
+    READER_SOURCE_MISMATCH: "链接不属于指定公众号或缺少文章标识",
+    CHALLENGE_REQUIRED: "微信要求安全验证，当前尚未读取成功",
+    RATE_LIMITED: "微信暂时限制访问频率",
+    ARTICLE_REMOVED: "原文已删除或当前不可见",
+    ARTICLE_INVALID: "尚未取得完整正文",
+    ARTICLE_VERIFICATION_REQUIRED: "需先读取原文，才能确认公开留言",
+    COMMENT_ID_MISSING: "文章未返回可用的公开留言标识",
+    COMMENT_ID_REQUIRED: "文章未返回可用的公开留言标识",
+    COMMENTS_UNAVAILABLE: "尚未读取到公开留言",
+    SOURCE_FORMAT_CHANGED: "微信返回格式发生变化，当前未能完整读取",
+    READER_RESPONSE_INVALID: "微信未返回有效阅读数据",
+    READER_TIME_INVALID: "未能确认原文发布时间",
+    ARTICLE_IDENTITY_MISMATCH: "返回内容与目标文章不一致，未保存",
+    UPSTREAM_ERROR: "微信访问暂时失败，请稍后重试",
+  };
+  const readerSucceeded = value => ["available", "succeeded", "completed", "complete", "readable", "verified", "success"].includes(value?.state);
+  const readerCount = value => Number.isSafeInteger(value) && value >= 0 ? value : null;
+  function readerStage(value, kind) {
+    if (value?.code) return readerErrors[value.code] || "本次未能验证成功";
+    if (["queued", "pending", "running", "checking"].includes(value?.state)) return "正在验证";
+    if (kind === "discovery" && value?.state === "empty") return "列表未返回文章，实时发现能力尚未确认";
+    if (readerSucceeded(value) || kind === "comments" && value?.state === "partial") {
+      if (kind === "discovery") {
+        const count = readerCount(value.article_count);
+        return count === null ? "列表可读取，文章数量尚未确认" : count > 0 ? `已读取 ${count} 篇文章的列表` : "列表未返回文章，实时发现能力尚未确认";
+      }
+      if (kind === "article") return `正文可读取；${value.comment_id_present === true ? "已取得公开留言标识" : "未取得公开留言标识"}`;
+      const count = readerCount(value.count);
+      const replies = readerCount(value.reply_count);
+      if (count === null) return "留言请求已返回，数量尚未确认";
+      return `已读取 ${count} 条公开留言${replies === null ? "" : `、${replies} 条回复`}；${value.complete === true ? "本次获取完成" : "尚未确认全部获取完成"}`;
+    }
+    if (["blocked", "failed", "error", "unavailable", "restricted"].includes(value?.state)) return "本次未能读取，请查看授权或微信访问状态";
+    if (["skipped", "not_attempted", "not_started"].includes(value?.state)) return "尚未执行";
+    return "尚未验证";
+  }
+
+  function renderReader(reader) {
+    const session = reader?.session;
+    const expires = formatDate(session?.expires_at);
+    $("reader-session-status").textContent = session?.expired === true
+      ? "微信阅读授权已过期；公众号后台登录不能替代此授权。"
+      : session?.configured === true ? `已保存短期阅读授权${expires ? `，程序将于 ${expires}（北京时间）停止使用` : ""}；实际可用状态以验证结果为准。`
+        : "尚未配置微信阅读授权，将先尝试公开访问。";
+    const probe = reader?.probe;
+    const checked = formatDate(probe?.checked_at);
+    $("reader-probe-status").textContent = probe?.state === "session_changed" ? "阅读授权已变化，请重新验证。"
+      : ["queued", "pending", "running", "checking"].includes(probe?.state)
+      ? "验证正在云端进行，可关闭页面后再查看。"
+      : checked ? `最近验证：${checked}（北京时间）。` : "尚未验证。";
+    $("reader-results").replaceChildren();
+    for (const [kind, title] of [["discovery", "新文章列表"], ["article", "文章正文"], ["comments", "公开留言与回复"]]) {
+      const row = element("li", undefined, "admin-row");
+      row.append(element("strong", title), element("p", readerStage(probe?.state === "session_changed" ? null : probe?.[kind], kind), "help"));
+      $("reader-results").append(row);
+    }
+  }
+
+  function publicReaderUrl(value) {
+    if (!value) return undefined;
+    let url;
+    try { url = new URL(value); } catch { throw new Error("请输入有效的微信公开文章链接，或留空验证最新文章。"); }
+    if (url.origin !== "https://mp.weixin.qq.com" || url.username || url.password || url.port
+        || !(url.pathname === "/s" || /^\/s\/[A-Za-z\d_-]+$/.test(url.pathname))) {
+      throw new Error("请使用微信官方公开文章链接，或留空验证最新文章。");
+    }
+    if ([...url.searchParams.keys()].some(key => /^(?:key|uin|pass_ticket|appmsg_token|wxtoken|cookie)$/i.test(key))
+        || /(?:^|[?&#])(?:key|uin|pass_ticket|appmsg_token|wxtoken|cookie)=/i.test(url.hash)) {
+      $("reader-article-url").value = "";
+      throw new Error("此链接含阅读授权信息，请使用下方“导入一次微信阅读授权”。");
+    }
+    url.hash = "";
+    for (const key of [...url.searchParams.keys()]) if (!["__biz", "mid", "idx", "sn"].includes(key)) url.searchParams.delete(key);
+    return url.href;
+  }
+
+  async function queueReaderProbe(url) {
+    await post("/api/admin/reader/probe", url ? { url } : {});
+    message("reader-message", "验证已安排，结果会自动更新。关闭页面后仍会继续。");
+    await refresh();
   }
 
   const isRss = source => source?.provider === "rss";
@@ -476,6 +570,7 @@
       else serviceText = loginText;
       $("service-status").textContent = serviceText;
       renderScheduler(data.scheduler);
+      renderReader(data.reader);
       const today = todayInBeijing();
       $("start-date").max = today;
       $("end-date").max = today;
@@ -595,6 +690,48 @@
     });
   });
 
+  $("reader-probe-form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    let url;
+    try { url = publicReaderUrl($("reader-article-url").value.trim()); }
+    catch (error) { message("reader-message", error.message, false); return; }
+    const button = event.submitter || event.currentTarget.querySelector("button");
+    const version = state.version;
+    await busy(button, async () => {
+      try { await queueReaderProbe(url); }
+      catch (error) { if (version === state.version) message("reader-message", readerErrors[error.code] || "本次验证未能启动，请稍后重试。", false); }
+    });
+  });
+
+  $("reader-session-form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    let readingUrl = $("reader-session-url").value.trim();
+    $("reader-session-url").value = "";
+    const button = event.submitter || event.currentTarget.querySelector("button");
+    const version = state.version;
+    await busy(button, async () => {
+      try {
+        let parsed;
+        try { parsed = new URL(readingUrl); } catch { throw new Error("请提供含微信阅读状态的官方链接。"); }
+        if (parsed.origin !== "https://mp.weixin.qq.com" || parsed.username || parsed.password || parsed.port) throw new Error("阅读授权仅支持微信官方 HTTPS 链接。");
+        if (["uin", "key", "pass_ticket"].some(key => parsed.searchParams.getAll(key).length !== 1 || !parsed.searchParams.get(key))) {
+          throw new Error("这是普通分享链接或不完整的授权链接，未包含可用的微信阅读状态。");
+        }
+        try { await post("/api/admin/reader/session", { url: readingUrl }); }
+        catch (error) {
+          if (version === state.version) message("reader-session-message", readerErrors[error.code] || "阅读授权未能保存，请检查链接是否含有效阅读状态。", false);
+          return;
+        } finally { readingUrl = ""; }
+        if (version !== state.version) return;
+        message("reader-session-message", "阅读授权已保存，正在验证实际可用状态。");
+        // Authentication URLs are never forwarded to the public probe endpoint.
+        try { await queueReaderProbe(); }
+        catch (error) { if (version === state.version) message("reader-message", readerErrors[error.code] || "授权已保存，验证暂未启动，请点击“验证阅读与留言”。", false); }
+      } catch (error) { if (version === state.version) message("reader-session-message", error.message, false); }
+      finally { readingUrl = ""; }
+    });
+  });
+
   $("wechat-login-button").addEventListener("click", async (event) => {
     try { await busy(event.currentTarget, () => startWechatLogin()); }
     catch (error) { if (relevantError(error)) message("page-message", error.message, false); }
@@ -630,7 +767,10 @@
     clearTimeout(state.timer);
     if (!document.hidden && state.authenticated) { await refresh(); schedulePoll(); }
   });
-  window.addEventListener("pagehide", () => clearTimeout(state.timer));
+  window.addEventListener("pagehide", () => {
+    clearTimeout(state.timer);
+    $("reader-session-url").value = "";
+  });
   window.addEventListener("pageshow", async (event) => {
     if (event.persisted && !document.hidden && state.authenticated) { await refresh(); schedulePoll(); }
   });

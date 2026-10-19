@@ -279,3 +279,34 @@ test('operator capture verification returns only metrics and releases its accoun
   assert.deepEqual(await workflow.run({ payload: { action: 'verify-capture', url: 'https://mp.weixin.qq.com/s/article' } }, step), { state: 'verified', ...value });
   assert.equal(calls.at(-1).type, 'release');
 });
+
+test('reading verification routes one public-identity payload to the account executor with retries disabled', async t => {
+  const { workflow, env, calls } = fixture(t);
+  const payload = { action: 'probe-reader', probe_id: 'public-probe-id', url: 'https://mp.weixin.qq.com/s?__biz=public&mid=1',
+    credentials: { uin: 'private-uin', key: 'private-key' }, cookie: 'private-cookie', job_id: 'unrelated-job' };
+  const routed = [];
+  const steps = [];
+  env.ARCHIVE_EXECUTOR = { getByName(name) { return { async probeReader(options) {
+    routed.push({ name, options }); return { state: 'attention', comments: { state: 'blocked' } };
+  } }; } };
+  const step = { async do(name, config, callback) { steps.push({ name, config }); return callback(); },
+    sleepUntil: () => assert.fail('Reading verification must not schedule implicit retries') };
+  const result = await workflow.run({ payload }, step);
+  assert.deepEqual(result, { state: 'attention', comments: { state: 'blocked' } });
+  assert.deepEqual(routed, [{ name: 'wechat-account', options: { url: payload.url, probe_id: payload.probe_id } }]);
+  assert.deepEqual(steps, [{ name: 'probe-reader', config: { retries: { limit: 0, delay: '1 second' }, timeout: '4 minutes' } }]);
+  assert.deepEqual(calls, [], 'The reader service owns its own lease; Workflow must not acquire the backend account lease');
+  assert.doesNotMatch(JSON.stringify(routed), /private-|credentials|cookie|unrelated-job/);
+});
+
+test('reading verification leaves an executor failure to the caller without an additional attempt', async t => {
+  const { workflow, env } = fixture(t);
+  let attempts = 0;
+  env.ARCHIVE_EXECUTOR = { getByName: () => ({ async probeReader() {
+    attempts++; throw Object.assign(new Error('Reading verification blocked'), { code: 'CHALLENGE_REQUIRED' });
+  } }) };
+  const step = { async do(_name, config, callback) { assert.equal(config.retries.limit, 0); return callback(); } };
+  await assert.rejects(workflow.run({ payload: { action: 'probe-reader', probe_id: 'public-probe-id', url: 'https://mp.weixin.qq.com/s/public' } }, step),
+    { code: 'CHALLENGE_REQUIRED' });
+  assert.equal(attempts, 1);
+});

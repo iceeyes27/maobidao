@@ -6,6 +6,8 @@ import { handleAdmin, handleArchiveSubmit } from "../src/archive/api.js";
 import { ArchiveStore } from "../src/archive/store.js";
 import { beijingDate, createAdminSession } from "../src/archive/core.js";
 import { RSS_ACCOUNT_BIZ, RSS_FEED_URL, RSS_STATE_KEY } from "../src/archive/rss-source.js";
+import { loadReaderSession } from "../src/archive/reader-session.js";
+import { validateReaderArticleUrl } from "../src/archive/wechat-reader.js";
 
 function fixture() {
   const sql = new DatabaseSync(":memory:");
@@ -244,4 +246,108 @@ test("login screenshots remain private while their bytes cross the execution bou
   const response = await handleAdmin(await adminRequest(path, env), env);
   assert.equal(response.headers.get("cache-control"), "no-store, private");
   assert.deepEqual([...new Uint8Array(await response.arrayBuffer())], [137,80,78,71]);
+});
+
+function readerBucket(env) {
+  const objects = new Map();
+  const writes = [];
+  env.ARCHIVE_BUCKET = {
+    async get(key) {
+      const body = objects.get(key);
+      return body === undefined ? null : { size: Buffer.byteLength(body), text: async () => body };
+    },
+    async put(key, body, options) { writes.push({ key, options }); objects.set(key, String(body)); },
+  };
+  return { objects, writes };
+}
+
+const readerCredentials = () => ({ kind: "wechat-reader", account_biz: RSS_ACCOUNT_BIZ, uin: "123456",
+  key: "synthetic-reader-key", pass_ticket: "synthetic-reader-ticket", cookie: "wxtokenkey=synthetic-reader-cookie" });
+const readerUrl = () => `https://mp.weixin.qq.com/s?__biz=${encodeURIComponent(RSS_ACCOUNT_BIZ)}&mid=2247498657&idx=1&sn=5cdfb9d08d7f6844b121f8618cd9dba3`;
+
+test("reader authorization and verification reject unsigned or cross-origin requests before persistence", async t => {
+  const { env, sql } = fixture();
+  t.after(() => sql.close());
+  const { writes } = readerBucket(env);
+  const workflows = [];
+  env.ARCHIVE_WORKFLOW.create = async value => { workflows.push(value); return {}; };
+  for (const endpoint of ["session", "probe"]) {
+    const path = `/api/admin/reader/${endpoint}`;
+    const body = endpoint === "session" ? { credentials: readerCredentials() } : { url: readerUrl() };
+    const unsigned = new Request(`https://archive.example${path}`, { method: "POST",
+      headers: { origin: "https://archive.example", "content-type": "application/json" }, body: JSON.stringify(body) });
+    await assert.rejects(handleAdmin(unsigned, env), { status: 401 });
+    await assert.rejects(handleAdmin(await adminRequest(path, env, body, { origin: "https://untrusted.example" }), env), { status: 403 });
+    await assert.rejects(handleAdmin(await adminRequest(path, env, body, { "sec-fetch-site": "cross-site" }), env), { status: 403 });
+  }
+  assert.deepEqual(writes, []);
+  assert.deepEqual(workflows, []);
+  assert.equal(sql.prepare("SELECT COUNT(*) AS total FROM archive_leases").get().total, 0);
+});
+
+test("reader authorization endpoint encrypts credentials, returns only safe metadata and releases its lease", async t => {
+  const { env, sql, store } = fixture();
+  t.after(() => sql.close());
+  const { objects, writes } = readerBucket(env);
+  const credentials = readerCredentials();
+  const response = await handleAdmin(await adminRequest("/api/admin/reader/session", env, { credentials }), env);
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get("cache-control"), "no-store");
+  const result = await response.json();
+  assert.deepEqual(Object.keys(result), ["session"]);
+  assert.deepEqual(Object.keys(result.session).sort(), ["configured", "expired", "expires_at", "revision", "saved_at"]);
+  assert.equal(result.session.configured, true);
+  assert.equal(result.session.expired, false);
+  assert.doesNotMatch(JSON.stringify(result), /synthetic-reader|uin|pass_ticket|cookie|ciphertext|private\//);
+  assert.equal(writes.length, 1);
+  const encrypted = [...objects.values()][0];
+  assert.doesNotMatch(encrypted, /synthetic-reader|123456|pass_ticket|cookie/);
+  assert.equal(JSON.parse(encrypted).format, 1);
+  const restored = await loadReaderSession(env);
+  assert.equal(restored.key, credentials.key);
+  assert.equal(restored.cookie, credentials.cookie);
+  const lease = await store.acquireLease("wechat-reader", "next-reader-request", 1000);
+  assert.ok(lease, "The next reading request can acquire the released authorization lease");
+  await store.releaseLease(lease);
+  assert.equal(sql.prepare("SELECT object_key FROM archive_session WHERE singleton=1").get().object_key, null);
+});
+
+test("reader authorization releases its lease when validation or encrypted storage fails", async t => {
+  const { env, sql, store } = fixture();
+  t.after(() => sql.close());
+  const { writes } = readerBucket(env);
+  await assert.rejects(handleAdmin(await adminRequest("/api/admin/reader/session", env,
+    { credentials: { ...readerCredentials(), kind: "backend" } }), env), { code: "READER_LOGIN_REQUIRED" });
+  assert.deepEqual(writes, []);
+  env.ARCHIVE_BUCKET.put = async () => { throw new Error("Synthetic storage interruption"); };
+  await assert.rejects(handleAdmin(await adminRequest("/api/admin/reader/session", env,
+    { credentials: readerCredentials() }), env), /Synthetic storage interruption/);
+  const lease = await store.acquireLease("wechat-reader", "request-after-save-error", 1000);
+  assert.ok(lease);
+  await store.releaseLease(lease);
+});
+
+test("reader verification queues only the canonical public article identity and no reading credentials", async t => {
+  const { env, sql, store } = fixture();
+  t.after(() => sql.close());
+  const { objects } = readerBucket(env);
+  await handleAdmin(await adminRequest("/api/admin/reader/session", env, { credentials: readerCredentials() }), env);
+  const created = [];
+  env.ARCHIVE_WORKFLOW.create = async options => { created.push(structuredClone(options)); return {}; };
+  const input = `${readerUrl()}&uin=123456&key=synthetic-input-key&pass_ticket=synthetic-input-ticket&from=timeline#fragment`;
+  const response = await handleAdmin(await adminRequest("/api/admin/reader/probe", env, { url: input }), env);
+  assert.equal(response.status, 202);
+  const result = await response.json();
+  assert.deepEqual(Object.keys(result).sort(), ["probe_id", "status"]);
+  assert.equal(result.status, "queued");
+  assert.equal(created.length, 1);
+  assert.equal(created[0].id, `reader-probe-${result.probe_id}`);
+  assert.deepEqual(created[0].params, { action: "probe-reader", probe_id: result.probe_id, url: validateReaderArticleUrl(input).url });
+  assert.doesNotMatch(JSON.stringify(created), /synthetic|uin|pass_ticket|cookie|fragment|timeline|revision/);
+  const reports = [...objects.values()].filter(body => body.includes('"state":"queued"'));
+  assert.equal(reports.length, 1);
+  assert.doesNotMatch(reports[0], /synthetic|pass_ticket|cookie/);
+  const lease = await store.acquireLease("reader-probe-request", "next-probe-request", 1000);
+  assert.ok(lease);
+  await store.releaseLease(lease);
 });

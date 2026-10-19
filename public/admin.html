@@ -56,6 +56,29 @@
           <p id="wechat-help" class="help">扫码后需要在微信中确认。登录结果以检查结果为准。</p>
         </div>
       </section>
+      <section class="panel" aria-labelledby="reader-title">
+        <h2 id="reader-title">微信阅读与留言验证</h2>
+        <p class="help">分别验证新文章列表、文章正文和公开留言。验证成功前，不代表实时获取已经可用。</p>
+        <p id="reader-session-status" class="help" role="status" aria-live="polite">正在读取微信阅读授权状态…</p>
+        <p id="reader-probe-status" class="help" role="status" aria-live="polite">尚未验证。</p>
+        <ul id="reader-results" class="admin-list" aria-label="微信阅读验证结果"></ul>
+        <form id="reader-probe-form">
+          <label for="reader-article-url">公开文章链接（可留空）</label>
+          <input id="reader-article-url" type="url" maxlength="8192" autocomplete="off" placeholder="留空验证已存的最新文章">
+          <button type="submit">验证阅读与留言</button>
+          <p id="reader-message" class="result" role="status" aria-live="polite"></p>
+        </form>
+        <details>
+          <summary>已有阅读授权时，进行短期验证</summary>
+          <p class="help">仅供已取得有效阅读授权时验证，不能自动续期。普通分享链接不包含阅读状态，在系统浏览器打开也不能保证取得授权；公众号后台扫码登录不能替代。授权只在本页导入，请勿发到聊天中。</p>
+          <form id="reader-session-form" autocomplete="off">
+            <label for="reader-session-url">含阅读状态的猫笔刀文章链接</label>
+            <input id="reader-session-url" type="password" maxlength="16384" autocomplete="off" spellcheck="false" required>
+            <button type="submit">保存授权并验证</button>
+            <p id="reader-session-message" class="result" role="status" aria-live="polite"></p>
+          </form>
+        </details>
+      </section>
       <section class="panel" aria-labelledby="sources-title">
         <h2 id="sources-title">文章来源</h2>
         <p class="help">猫笔刀公开订阅源已由服务配置。以下搜索用于添加公众号后台来源，需要微信登录。</p>

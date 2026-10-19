@@ -10,7 +10,7 @@ const hooks = registerHooks({
   resolve(specifier, context, next) {
     if (specifier === 'cloudflare:workers') return { url: 'test:executor-cloudflare', shortCircuit: true };
     if (context.parentURL?.includes('/src/archive/executor.js')) {
-      for (const name of ['collector', 'dispatch', 'runner', 'resources', 'rss-bootstrap']) {
+      for (const name of ['collector', 'dispatch', 'runner', 'resources', 'rss-bootstrap', 'reading-service']) {
         if (specifier === `./${name}.js`) return { url: `test:executor-${name}`, shortCircuit: true };
       }
     }
@@ -22,6 +22,7 @@ const hooks = registerHooks({
     if (url === 'test:executor-collector') source = names.map((name) => `export const ${name}=(...args)=>globalThis.__archiveExecutorMocks.${name}(...args);`).join('\n');
     if (url === 'test:executor-dispatch') source = 'export const scheduledArchive=(...args)=>globalThis.__archiveExecutorMocks.schedule(...args); export const dispatchPending=(...args)=>globalThis.__archiveExecutorMocks.pending(...args); export const dispatchJob=(...args)=>globalThis.__archiveExecutorMocks.dispatch(...args);';
     if (url === 'test:executor-rss-bootstrap') source = 'export const bootstrapRss=(...args)=>globalThis.__archiveExecutorMocks.bootstrap(...args);';
+    if (url === 'test:executor-reading-service') source = 'export const runReadingProbe=(...args)=>globalThis.__archiveExecutorMocks.probeReader(...args);';
     if (url === 'test:executor-runner') source = 'export const runArchiveBatch=(...args)=>globalThis.__archiveExecutorMocks.run(...args);';
     if (url === 'test:executor-resources') source = 'export const fetchImageResource=(...args)=>globalThis.__archiveExecutorMocks.fetchImage(...args);';
     return source ? { format: 'module', source, shortCircuit: true } : next(url, context);
@@ -161,6 +162,34 @@ test('a previously bound job cannot become an image resource executor', async (t
   mocks.fetchImage = async () => { calls++; };
   assert.equal((await executor.fetchImage('https://images.example.com/photo.png')).error.code, 'EXECUTOR_BINDING_MISMATCH');
   assert.equal(calls, 0);
+});
+
+test('reading verification binds the account executor persistently and injects only its server environment', async t => {
+  const { ctx, env, executor } = setup(t);
+  const options = { url: 'https://mp.weixin.qq.com/s?__biz=public&mid=1', probe_id: 'public-probe-id' };
+  const calls = [];
+  mocks.probeReader = async (...args) => { calls.push(args); return { state: 'attention', comments: { state: 'blocked' } }; };
+  const result = await executor.probeReader(options);
+  assert.deepEqual(result, { state: 'attention', comments: { state: 'blocked' } });
+  assert.deepEqual(calls, [[env, options]]);
+  const restarted = new ArchiveExecutor(ctx, env);
+  await assert.rejects(restarted.runBatch('unrelated-job'), { code: 'EXECUTOR_BINDING_MISMATCH' });
+  assert.equal((await restarted.fetchImage('https://images.example.com/photo.png')).error.code, 'EXECUTOR_BINDING_MISMATCH');
+  assert.equal(calls.length, 1);
+});
+
+test('reading verification cannot reuse job or image resource executors', async t => {
+  const job = setup(t);
+  mocks.run = async (_env, jobId) => ({ state: 'completed', job_id: jobId });
+  await job.executor.runBatch('existing-job');
+  let probes = 0;
+  mocks.probeReader = async () => { probes++; return { state: 'verified' }; };
+  await assert.rejects(job.executor.probeReader({}), { code: 'EXECUTOR_BINDING_MISMATCH' });
+  const resource = setup(t);
+  mocks.fetchImage = async url => ({ url, bytes: new Uint8Array([1]), contentType: 'image/png' });
+  await resource.executor.fetchImage('https://images.example.com/photo.png');
+  await assert.rejects(resource.executor.probeReader({}), { code: 'EXECUTOR_BINDING_MISMATCH' });
+  assert.equal(probes, 0);
 });
 
 test('image error envelopes retain safe known attributes', async (t) => {
